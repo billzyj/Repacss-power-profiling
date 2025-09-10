@@ -34,10 +34,10 @@ python setup.py
 
 ### 2. Configuration
 
+The setup script automatically creates the configuration file and adds it to `.gitignore`. You just need to edit the generated file with your credentials:
+
 ```bash
-cp src/templates/config_template.py src/core/config.py
 # Edit src/core/config.py with your database and SSH credentials
-echo "src/core/config.py" >> .gitignore
 ```
 
 ### 3. Test Connection

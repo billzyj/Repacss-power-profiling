@@ -21,10 +21,9 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Get project root directory (parent of src)
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-from queries.compute.idrac import (
-    get_power_metrics_with_names,
-    get_power_metrics_with_names_by_time_range
-)
+from queries.compute.idrac import get_power_metrics_with_joins
+from queries.compute.public import POWER_METRICS_QUERY_UNIT_IN_MW_W_KW
+from core.power_utils import get_power_conversion_sql, should_exclude_metric
 from core.database import (
     connect_to_database, 
     connect_to_specific_databases,
@@ -32,72 +31,69 @@ from core.database import (
     get_client
 )
 
-def get_power_queries_for_node(node_id: int, hours_back: int = 360) -> Dict[str, str]:
+def get_dynamic_power_queries_for_node(node_id: int, database_name: str, hours_back: int = 24) -> Dict[str, str]:
     """
-    Get all power queries for a specific node over the past 15 days
+    Get dynamic power queries for a specific node based on available metrics
     
     Args:
         node_id: Node ID to query
-        hours_back: Number of hours to look back (default: 360 = 15 days)
+        database_name: Database name (h100 or zen4)
+        hours_back: Number of hours to look back (default: 24)
     """
     queries = {}
     
-    # System Power Consumption (Total)
-    queries["System Power"] = f"""
-    SELECT 
-        p.timestamp,
-        n.hostname,
-        p.value as value,
-        'System Power' as source,
-        'Total System' as fqdd
-    FROM idrac.systempowerconsumption p
-    LEFT JOIN public.nodes n ON p.nodeid = n.nodeid
-    WHERE p.nodeid = {node_id} 
-    AND p.timestamp >= NOW() - INTERVAL '{hours_back} hours'
-    ORDER BY p.timestamp DESC;
-    """
-    
-    # GPU Power Consumption (convert from mW to W)
-    queries["GPU Power"] = f"""
-    SELECT 
-        p.timestamp,
-        n.hostname,
-        p.value / 1000.0 as value,  -- Convert mW to W
-        'GPU Power' as source,
-        'GPU' as fqdd
-    FROM idrac.powerconsumption p
-    LEFT JOIN public.nodes n ON p.nodeid = n.nodeid
-    WHERE p.nodeid = {node_id} 
-    AND p.timestamp >= NOW() - INTERVAL '{hours_back} hours'
-    ORDER BY p.timestamp DESC;
-    """
-    
-    # Component power tables (every 5 mins)
-    component_tables = [
-        ('totalcpupower', 'CPU Power'),
-        ('totalfanpower', 'Fan Power'),
-        ('totalfpgapower', 'FPGA Power'),
-        ('totalmemorypower', 'Memory Power'),
-        ('totalpciepower', 'PCIe Power'),
-        ('totalstoragepower', 'Storage Power')
-    ]
-    
-    for table, display_name in component_tables:
-        queries[display_name] = f"""
-        SELECT 
-            p.timestamp,
-            n.hostname,
-            p.value as value,
-            '{display_name}' as source,
-            '{display_name}' as fqdd
-        FROM idrac.{table} p
-        LEFT JOIN public.nodes n ON p.nodeid = n.nodeid
-        WHERE p.nodeid = {node_id} 
-        AND p.timestamp >= NOW() - INTERVAL '{hours_back} hours'
-        ORDER BY p.timestamp DESC;
-        """
-    
-    return queries
+    try:
+        # Connect to public schema to get power metrics list
+        public_client = connect_to_database(database_name, 'public')
+        if not public_client:
+            print(f"❌ Failed to connect to {database_name} public schema")
+            return {}
+        
+        # Get power metrics from public schema
+        df_power_metrics = pd.read_sql_query(POWER_METRICS_QUERY_UNIT_IN_MW_W_KW, public_client.db_connection)
+        
+        if df_power_metrics.empty:
+            print(f"  - No power metrics found in {database_name} public schema")
+            return {}
+        
+        # Get metric IDs (convert to lowercase for idrac schema table names)
+        power_metrics = df_power_metrics['metric_id'].str.lower().tolist()
+        
+        print(f"  - Found {len(power_metrics)} power metrics to process for node {node_id}")
+        
+        # Create queries for each power metric
+        for metric in power_metrics:
+            # Get the original metric ID (with proper case) for display
+            original_metric_id = df_power_metrics[df_power_metrics['metric_id'].str.lower() == metric]['metric_id'].iloc[0]
+            
+            # Create query using the get_power_metrics_with_joins function
+            base_query = get_power_metrics_with_joins(metric, limit=10000)
+            
+            # Modify the query to filter by node_id and time range
+            # Use intelligent power conversion based on metric type
+            conversion_sql = get_power_conversion_sql(metric)
+            
+            modified_query = f"""
+            SELECT 
+                m.timestamp,
+                n.hostname,
+                {conversion_sql},
+                m.source,
+                m.fqdd
+            FROM idrac.{metric} m
+            LEFT JOIN public.nodes n ON m.nodeid = n.nodeid
+            WHERE m.nodeid = {node_id} 
+            AND m.timestamp >= NOW() - INTERVAL '{hours_back} hours'
+            ORDER BY m.timestamp DESC
+            """
+            
+            queries[original_metric_id] = modified_query
+        
+        return queries
+        
+    except Exception as e:
+        print(f"Error getting dynamic power queries: {e}")
+        return {}
 
 def run_queries_on_database(client, queries: Dict[str, str]) -> Dict[str, pd.DataFrame]:
     """
@@ -148,6 +144,10 @@ def create_power_graphs_for_node(results: Dict[str, pd.DataFrame], output_dir: s
         node_id: Node ID for the graph title and filename
     """
     try:
+        # Create node-specific subdirectory
+        node_output_dir = os.path.join(output_dir, f"node_{node_id}")
+        os.makedirs(node_output_dir, exist_ok=True)
+        
         # Set up the plot style
         plt.style.use('default')
         rcParams['figure.figsize'] = (16, 10)
@@ -160,10 +160,15 @@ def create_power_graphs_for_node(results: Dict[str, pd.DataFrame], output_dir: s
         colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', 
                  '#9467bd', '#8c564b', '#e377c2', '#17becf']
         
-        # Plot each power metric
+        # Plot each power metric (excluding SystemHeadRoomInstantaneous)
         for i, (power_name, df) in enumerate(results.items()):
             if df.empty:
                 print(f"⚠️  No data for {power_name}, skipping...")
+                continue
+            
+            # Skip excluded metrics (like SystemHeadRoomInstantaneous)
+            if should_exclude_metric(power_name):
+                print(f"⚠️  Skipping {power_name} (excluded metric)...")
                 continue
                 
             # Convert timestamp to datetime if it's not already
@@ -204,13 +209,13 @@ def create_power_graphs_for_node(results: Dict[str, pd.DataFrame], output_dir: s
         
         # Save the plot
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = os.path.join(output_dir, f"power_consumption_{database_name}_node{node_id}_{timestamp}.png")
+        filename = os.path.join(node_output_dir, f"power_consumption_{database_name}_node{node_id}_{timestamp}.png")
         plt.savefig(filename, dpi=300, bbox_inches='tight')
         
         print(f"✓ Power consumption graph for Node {node_id} saved to {filename}")
         
         # Also save as PDF for vector graphics
-        pdf_filename = os.path.join(output_dir, f"power_consumption_{database_name}_node{node_id}_{timestamp}.pdf")
+        pdf_filename = os.path.join(node_output_dir, f"power_consumption_{database_name}_node{node_id}_{timestamp}.pdf")
         plt.savefig(pdf_filename, bbox_inches='tight')
         print(f"✓ Power consumption graph for Node {node_id} saved to {pdf_filename}")
         
@@ -221,6 +226,60 @@ def create_power_graphs_for_node(results: Dict[str, pd.DataFrame], output_dir: s
         print(f"✗ Error creating power graphs: {str(e)}")
         import traceback
         traceback.print_exc()
+
+def create_excel_report_for_node(results: Dict[str, pd.DataFrame], output_dir: str, database_name: str, node_id: int):
+    """
+    Create Excel report with separate sheets for each power metric for a specific node
+    
+    Args:
+        results: Dictionary mapping power metric names to DataFrames
+        output_dir: Output directory for Excel file
+        database_name: Name of the database (for filename)
+        node_id: Node ID for the filename
+    """
+    try:
+        # Create node-specific subdirectory
+        node_output_dir = os.path.join(output_dir, f"node_{node_id}")
+        os.makedirs(node_output_dir, exist_ok=True)
+        
+        # Create filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"node_{node_id}_power_data_{database_name}_{timestamp}.xlsx"
+        output_path = os.path.join(node_output_dir, filename)
+        
+        # Filter out empty DataFrames and excluded metrics
+        filtered_results = {}
+        for power_name, df in results.items():
+            if not df.empty and not should_exclude_metric(power_name):
+                # Convert timestamp to timezone-unaware for Excel compatibility
+                if 'timestamp' in df.columns:
+                    df_copy = df.copy()
+                    df_copy['timestamp'] = df_copy['timestamp'].dt.tz_localize(None)
+                    filtered_results[power_name] = df_copy
+                else:
+                    filtered_results[power_name] = df
+        
+        # Check if we have any data to write
+        if not filtered_results:
+            print(f"❌ No data available to write to Excel report for {database_name} Node {node_id}")
+            return None
+        
+        # Create Excel file with separate sheets for each power metric
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            print(f"Writing Excel report for {database_name} Node {node_id}...")
+            
+            for sheet_name, df in filtered_results.items():
+                # Clean sheet name (Excel has limitations on sheet names)
+                clean_sheet_name = sheet_name.replace('/', '_').replace('\\', '_')[:31]  # Excel limit
+                df.to_excel(writer, sheet_name=clean_sheet_name, index=False)
+                print(f"  - {clean_sheet_name}: {len(df)} rows")
+        
+        print(f"✓ Excel report created successfully: {output_path}")
+        return output_path
+        
+    except Exception as e:
+        print(f"❌ Error creating Excel report for {database_name} Node {node_id}: {e}")
+        return None
 
 def parse_arguments():
     """Parse command line arguments"""
@@ -248,8 +307,8 @@ Examples:
     parser.add_argument(
         '--hours', 
         type=int, 
-        default=360,
-        help='Number of hours to look back (default: 360 = 15 days)'
+        default=24,
+        help='Number of hours to look back (default: 24 hours)'
     )
     
     parser.add_argument(
@@ -278,9 +337,11 @@ def main():
         ZEN4_NODE_RANGE = [args.node] if args.node <= 4 else []
         print(f"⚠️  Single node mode: Node {args.node}")
     else:
-        # All nodes mode
-        H100_NODE_RANGE = range(1, 9)  # Nodes 1-8 for H100
-        ZEN4_NODE_RANGE = range(1, 5)  # Nodes 1-4 for ZEN4
+        # Default to node 1 (rpg-93-1) for 24 hours as requested
+        H100_NODE_RANGE = [1]  # Focus on node 1 (rpg-93-1)
+        ZEN4_NODE_RANGE = [1]  # Focus on node 1
+        HOURS_BACK = 24  # Past 24 hours
+        print(f"⚠️  Default mode: Node 1 (rpg-93-1) for past 24 hours")
     
     # Determine which databases to process
     process_h100 = args.database in ['h100', 'both']
@@ -332,9 +393,9 @@ def main():
                 print(f"Processing H100 Node {node_id}...")
                 print("=" * 30)
                 
-                # Get queries for this specific node
-                queries = get_power_queries_for_node(node_id, hours_back=HOURS_BACK)
-                print(f"Found {len(queries)} power queries to run for H100 Node {node_id}")
+                # Get dynamic queries for this specific node
+                queries = get_dynamic_power_queries_for_node(node_id, 'h100', hours_back=HOURS_BACK)
+                print(f"Found {len(queries)} dynamic power queries to run for H100 Node {node_id}")
                 
                 # Run queries for this node
                 node_results = run_queries_on_database(h100_client, queries)
@@ -343,6 +404,10 @@ def main():
                 # Create graph for this node
                 print(f"\nCreating power consumption graph for H100 Node {node_id}...")
                 create_power_graphs_for_node(node_results, output_dir, "h100", node_id)
+                
+                # Create Excel report for this node
+                print(f"\nCreating Excel report for H100 Node {node_id}...")
+                excel_file = create_excel_report_for_node(node_results, output_dir, "h100", node_id)
                 
                 print(f"✓ Completed processing for H100 Node {node_id}")
         
@@ -358,9 +423,9 @@ def main():
                 print(f"Processing ZEN4 Node {node_id}...")
                 print("=" * 30)
                 
-                # Get queries for this specific node
-                queries = get_power_queries_for_node(node_id, hours_back=HOURS_BACK)
-                print(f"Found {len(queries)} power queries to run for ZEN4 Node {node_id}")
+                # Get dynamic queries for this specific node
+                queries = get_dynamic_power_queries_for_node(node_id, 'zen4', hours_back=HOURS_BACK)
+                print(f"Found {len(queries)} dynamic power queries to run for ZEN4 Node {node_id}")
                 
                 # Run queries for this node
                 node_results = run_queries_on_database(zen4_client, queries)
@@ -369,6 +434,10 @@ def main():
                 # Create graph for this node
                 print(f"\nCreating power consumption graph for ZEN4 Node {node_id}...")
                 create_power_graphs_for_node(node_results, output_dir, "zen4", node_id)
+                
+                # Create Excel report for this node
+                print(f"\nCreating Excel report for ZEN4 Node {node_id}...")
+                excel_file = create_excel_report_for_node(node_results, output_dir, "zen4", node_id)
                 
                 print(f"✓ Completed processing for ZEN4 Node {node_id}")
         
@@ -397,13 +466,17 @@ def main():
                 else:
                     print("    No data available")
         
-        print(f"\nGraphs created:")
+        print(f"\nOutput files created:")
         if process_h100:
             print(f"  - {len(H100_NODE_RANGE)} H100 node power consumption graphs (PNG and PDF)")
-            print(f"  - Files: power_consumption_h100_node1-8_*.png/pdf")
+            print(f"  - {len(H100_NODE_RANGE)} H100 node Excel reports")
+            print(f"  - Graph files: output/node_1/power_consumption_h100_node1_*.png/pdf")
+            print(f"  - Excel files: output/node_1/node_1_power_data_h100_*.xlsx")
         if process_zen4:
             print(f"  - {len(ZEN4_NODE_RANGE)} ZEN4 node power consumption graphs (PNG and PDF)")
-            print(f"  - Files: power_consumption_zen4_node1-4_*.png/pdf")
+            print(f"  - {len(ZEN4_NODE_RANGE)} ZEN4 node Excel reports")
+            print(f"  - Graph files: output/node_1/power_consumption_zen4_node1_*.png/pdf")
+            print(f"  - Excel files: output/node_1/node_1_power_data_zen4_*.xlsx")
         
         print("\n✓ Node level power queries completed successfully!")
     

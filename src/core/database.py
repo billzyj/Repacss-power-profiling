@@ -123,55 +123,58 @@ class DatabaseConnectionManager:
         return self.connected_databases.copy()
 
 
-# Global connection manager instance
-connection_manager = DatabaseConnectionManager()
+# Global connection manager instance (lazy initialization)
+_connection_manager: Optional[DatabaseConnectionManager] = None
 
 
 def get_connection_manager() -> DatabaseConnectionManager:
-    """Get the global connection manager instance"""
-    return connection_manager
+    """Get the global connection manager instance (lazy initialization)"""
+    global _connection_manager
+    if _connection_manager is None:
+        _connection_manager = DatabaseConnectionManager()
+    return _connection_manager
 
 
 def create_client_for_database(database_name: str, schema: str = None) -> REPACSSPowerClient:
     """Create a client instance for a specific database and schema"""
-    return connection_manager.create_client_for_database(database_name, schema)
+    return get_connection_manager().create_client_for_database(database_name, schema)
 
 
 def connect_to_database(database_name: str, schema: str = None) -> Optional[REPACSSPowerClient]:
     """Connect to a specific database and return the client"""
-    return connection_manager.connect_to_database(database_name, schema)
+    return get_connection_manager().connect_to_database(database_name, schema)
 
 
 def connect_to_all_databases(schema: str = None) -> Dict[str, REPACSSPowerClient]:
     """Connect to all available databases"""
-    return connection_manager.connect_to_all_databases(schema)
+    return get_connection_manager().connect_to_all_databases(schema)
 
 
 def connect_to_specific_databases(database_names: List[str], schema: str = None) -> Dict[str, REPACSSPowerClient]:
     """Connect to specific databases"""
-    return connection_manager.connect_to_specific_databases(database_names, schema)
+    return get_connection_manager().connect_to_specific_databases(database_names, schema)
 
 
 def disconnect_all():
     """Disconnect from all databases"""
-    connection_manager.disconnect_all()
+    get_connection_manager().disconnect_all()
 
 
 def get_client(database_name: str, schema: str = None) -> Optional[REPACSSPowerClient]:
     """Get a connected client for a specific database"""
-    return connection_manager.get_client(database_name, schema)
+    return get_connection_manager().get_client(database_name, schema)
 
 
 def get_all_clients() -> Dict[str, REPACSSPowerClient]:
     """Get all connected clients"""
-    return connection_manager.get_all_clients()
+    return get_connection_manager().get_all_clients()
 
 
 def is_connected(database_name: str, schema: str = None) -> bool:
     """Check if connected to a specific database"""
-    return connection_manager.is_connected(database_name, schema)
+    return get_connection_manager().is_connected(database_name, schema)
 
 
 def get_connected_databases() -> List[str]:
     """Get list of connected database names"""
-    return connection_manager.get_connected_databases()
+    return get_connection_manager().get_connected_databases()
