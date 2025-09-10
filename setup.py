@@ -11,8 +11,8 @@ from pathlib import Path
 
 def create_config_file():
     """Create config.py from template if it doesn't exist"""
-    template_path = Path("src/config_template.py")
-    config_path = Path("src/config.py")
+    template_path = Path("src/templates/config_template.py")
+    config_path = Path("src/core/config.py")
     
     if config_path.exists():
         print("✓ config.py already exists")
@@ -69,17 +69,17 @@ def check_gitignore():
     with open(gitignore_path, 'r') as f:
         content = f.read()
     
-    if "src/config.py" in content:
+    if "src/core/config.py" in content:
         print("✓ config.py is in .gitignore")
         return True
     else:
         print("⚠️  config.py is not in .gitignore")
-        print("Adding src/config.py to .gitignore...")
+        print("Adding src/core/config.py to .gitignore...")
         
         with open(gitignore_path, 'a') as f:
-            f.write("\n# Configuration files with sensitive data\nsrc/config.py\n")
+            f.write("\n# Configuration files with sensitive data\nsrc/core/config.py\n")
         
-        print("✓ Added src/config.py to .gitignore")
+        print("✓ Added src/core/config.py to .gitignore")
         return True
 
 
