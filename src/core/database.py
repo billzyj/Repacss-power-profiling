@@ -144,6 +144,13 @@ def connect_to_database(database_name: str, schema: str = None) -> Optional[REPA
     """Connect to a specific database and return the client"""
     return get_connection_manager().connect_to_database(database_name, schema)
 
+def get_raw_database_connection(database_name: str, schema: str = None):
+    """Connect to a specific database and return the raw database connection for pandas"""
+    client = get_connection_manager().connect_to_database(database_name, schema)
+    if client and hasattr(client, 'db_connection') and client.db_connection:
+        return client.db_connection
+    return None
+
 
 def connect_to_all_databases(schema: str = None) -> Dict[str, REPACSSPowerClient]:
     """Connect to all available databases"""

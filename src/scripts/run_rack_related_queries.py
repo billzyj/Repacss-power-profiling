@@ -1,376 +1,211 @@
-#!/usr/bin/env python3
-"""
-Run Rack Related Queries (PDU and IRC) from INFRA Database
-Handles infra.idrac schema queries for PDU and IRC infrastructure monitoring
-"""
+# This script is used to run rack-related power queries and validate power consumption
+# It compares compute node power consumption with PDU power consumption for validation
 
+import pandas as pd
 import sys
 import os
-import pandas as pd
 from datetime import datetime, timedelta
-from typing import Dict, List
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from queries.infra.irc_pdu import *
-from core.database import (
-    connect_to_database,
-    disconnect_all
-)
-
-
-class RackRelatedQueryRunner:
-    """Manages rack-related queries for PDU and IRC infrastructure"""
-    
-    def __init__(self):
-        self.client = None
-        
-    def connect_to_infra(self):
-        """Connect to INFRA database"""
-        print("🔌 Connecting to INFRA database...")
-        self.client = connect_to_database('infra', 'idrac')
-        
-        if not self.client:
-            print("❌ Failed to connect to INFRA database")
-            return False
-        
-        print("✓ Connected to INFRA database")
-        return True
-    
-    def disconnect(self):
-        """Disconnect from database"""
-        if self.client:
-            disconnect_all()
-    
-    def get_pdu_metrics(self, limit: int = 1000):
-        """Get PDU power metrics with hostname and units"""
-        try:
-            print("📊 Collecting PDU power metrics...")
-            
-            # Get PDU power metrics
-            df_pdu_power = pd.read_sql_query(
-                PDU_POWER_WITH_HOSTNAME_AND_UNITS, 
-                self.client.db_connection,
-                params=[limit]
-            )
-            
-            # Get PDU compressor power metrics
-            df_pdu_compressor = pd.read_sql_query(
-                PDU_COMPRESSORPOWER_WITH_HOSTNAME_AND_UNITS,
-                self.client.db_connection,
-                params=[limit]
-            )
-            
-            return {
-                'PDU_Power': df_pdu_power,
-                'PDU_Compressor_Power': df_pdu_compressor
-            }
-            
-        except Exception as e:
-            print(f"Error getting PDU metrics: {e}")
-            return {}
-    
-    def get_irc_metrics(self, limit: int = 1000):
-        """Get IRC infrastructure metrics with hostname and units"""
-        try:
-            print("📊 Collecting IRC infrastructure metrics...")
-            
-            results = {}
-            
-            # Temperature metrics
-            df_room_temp = pd.read_sql_query(
-                IRC_ROOMTEMPERATURE_WITH_HOSTNAME_AND_UNITS,
-                self.client.db_connection,
-                params=[limit]
-            )
-            results['IRC_Room_Temperature'] = df_room_temp
-            
-            # Pressure metrics
-            df_suction_pressure = pd.read_sql_query(
-                IRC_SUCTIONPRESSURE_WITH_HOSTNAME_AND_UNITS,
-                self.client.db_connection,
-                params=[limit]
-            )
-            results['IRC_Suction_Pressure'] = df_suction_pressure
-            
-            df_discharge_pressure = pd.read_sql_query(
-                IRC_DISCHARGEPRESSURE_WITH_HOSTNAME_AND_UNITS,
-                self.client.db_connection,
-                params=[limit]
-            )
-            results['IRC_Discharge_Pressure'] = df_discharge_pressure
-            
-            # Fan and motor control metrics
-            df_modulating_valve = pd.read_sql_query(
-                IRC_MODULATINGVALVEPOSITION_WITH_HOSTNAME_AND_UNITS,
-                self.client.db_connection,
-                params=[limit]
-            )
-            results['IRC_Modulating_Valve_Position'] = df_modulating_valve
-            
-            df_dry_cooler_fan = pd.read_sql_query(
-                IRC_DRYCOOLERFANSPEED_WITH_HOSTNAME_AND_UNITS,
-                self.client.db_connection,
-                params=[limit]
-            )
-            results['IRC_Dry_Cooler_Fan_Speed'] = df_dry_cooler_fan
-            
-            df_evaporator_fan = pd.read_sql_query(
-                IRC_EVAPORATORFANSPEED_WITH_HOSTNAME_AND_UNITS,
-                self.client.db_connection,
-                params=[limit]
-            )
-            results['IRC_Evaporator_Fan_Speed'] = df_evaporator_fan
-            
-            df_condenser_fan = pd.read_sql_query(
-                IRC_CONDENSERFANSPEED_WITH_HOSTNAME_AND_UNITS,
-                self.client.db_connection,
-                params=[limit]
-            )
-            results['IRC_Condenser_Fan_Speed'] = df_condenser_fan
-            
-            df_eev_position = pd.read_sql_query(
-                IRC_EEVPOSITION_WITH_HOSTNAME_AND_UNITS,
-                self.client.db_connection,
-                params=[limit]
-            )
-            results['IRC_EEV_Position'] = df_eev_position
-            
-            # Power supply metrics
-            df_fan_power_supply1 = pd.read_sql_query(
-                IRC_FANPOWERSUPPLY1_WITH_HOSTNAME_AND_UNITS,
-                self.client.db_connection,
-                params=[limit]
-            )
-            results['IRC_Fan_Power_Supply_1'] = df_fan_power_supply1
-            
-            df_fan_power_supply2 = pd.read_sql_query(
-                IRC_FANPOWERSUPPLY2_WITH_HOSTNAME_AND_UNITS,
-                self.client.db_connection,
-                params=[limit]
-            )
-            results['IRC_Fan_Power_Supply_2'] = df_fan_power_supply2
-            
-            # Run hours metrics
-            df_fan6_run_hours = pd.read_sql_query(
-                IRC_FAN6RUNHOURS_WITH_HOSTNAME_AND_UNITS,
-                self.client.db_connection,
-                params=[limit]
-            )
-            results['IRC_Fan6_Run_Hours'] = df_fan6_run_hours
-            
-            return results
-            
-        except Exception as e:
-            print(f"Error getting IRC metrics: {e}")
-            return {}
-    
-    def get_infrastructure_analysis(self):
-        """Get infrastructure efficiency analysis and alerts"""
-        try:
-            print("📊 Collecting infrastructure analysis...")
-            
-            results = {}
-            
-            # Infrastructure efficiency analysis
-            df_efficiency = pd.read_sql_query(
-                INFRA_EFFICIENCY_ANALYSIS,
-                self.client.db_connection
-            )
-            results['Infrastructure_Efficiency_Analysis'] = df_efficiency
-            
-            # High power usage alerts (threshold: 1000W)
-            df_high_power = pd.read_sql_query(
-                INFRA_HIGH_POWER_ALERTS,
-                self.client.db_connection,
-                params=[1000, 100]
-            )
-            results['High_Power_Alerts'] = df_high_power
-            
-            # High temperature alerts (threshold: 30°C)
-            df_high_temp = pd.read_sql_query(
-                INFRA_HIGH_TEMPERATURE_ALERTS,
-                self.client.db_connection,
-                params=[30, 100]
-            )
-            results['High_Temperature_Alerts'] = df_high_temp
-            
-            # Infrastructure cluster summary
-            df_cluster_summary = pd.read_sql_query(
-                INFRA_CLUSTER_SUMMARY,
-                self.client.db_connection
-            )
-            results['Infrastructure_Cluster_Summary'] = df_cluster_summary
-            
-            return results
-            
-        except Exception as e:
-            print(f"Error getting infrastructure analysis: {e}")
-            return {}
-    
-    def get_time_range_analysis(self, hours: int = 24):
-        """Get time range analysis for infrastructure metrics"""
-        try:
-            print(f"📊 Collecting {hours}-hour time range analysis...")
-            
-            results = {}
-            
-            # Get time range
-            end_time = datetime.now()
-            start_time = end_time - timedelta(hours=hours)
-            
-            # PDU power summary
-            pdu_summary_query = get_pdu_summary_with_hostname_and_units('power', hours)
-            df_pdu_summary = pd.read_sql_query(pdu_summary_query, self.client.db_connection)
-            results[f'PDU_Power_Summary_{hours}h'] = df_pdu_summary
-            
-            # IRC room temperature summary
-            irc_temp_summary_query = get_irc_summary_with_hostname_and_units('roomtemperature', hours)
-            df_irc_temp_summary = pd.read_sql_query(irc_temp_summary_query, self.client.db_connection)
-            results[f'IRC_Temperature_Summary_{hours}h'] = df_irc_temp_summary
-            
-            return results
-            
-        except Exception as e:
-            print(f"Error getting time range analysis: {e}")
-            return {}
-    
-    def create_excel_report(self, pdu_data, irc_data, analysis_data, time_range_data, output_filename=None):
-        """Create Excel report with separate sheets for each dataset"""
-        
-        # Create output directory if it doesn't exist
-        output_dir = "output"
-        os.makedirs(output_dir, exist_ok=True)
-        
-        if output_filename is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_filename = f"rack_related_queries_{timestamp}.xlsx"
-        
-        # Full path to output file
-        output_path = os.path.join(output_dir, output_filename)
-        
-        # Combine all data
-        all_data = {**pdu_data, **irc_data, **analysis_data, **time_range_data}
-        
-        # Filter out empty DataFrames
-        all_data = {k: v for k, v in all_data.items() if not v.empty}
-        
-        # Check if we have any data to write
-        if not all_data:
-            print("❌ No data available to write to Excel report")
-            return None
-        
-        try:
-            with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-                
-                # Write PDU data
-                print("Writing PDU metrics...")
-                for sheet_name, df in pdu_data.items():
-                    if not df.empty:
-                        df.to_excel(writer, sheet_name=sheet_name, index=False)
-                        print(f"  - {sheet_name}: {len(df)} rows")
-                
-                # Write IRC data
-                print("Writing IRC metrics...")
-                for sheet_name, df in irc_data.items():
-                    if not df.empty:
-                        df.to_excel(writer, sheet_name=sheet_name, index=False)
-                        print(f"  - {sheet_name}: {len(df)} rows")
-                
-                # Write analysis data
-                print("Writing infrastructure analysis...")
-                for sheet_name, df in analysis_data.items():
-                    if not df.empty:
-                        df.to_excel(writer, sheet_name=sheet_name, index=False)
-                        print(f"  - {sheet_name}: {len(df)} rows")
-                
-                # Write time range data
-                print("Writing time range analysis...")
-                for sheet_name, df in time_range_data.items():
-                    if not df.empty:
-                        df.to_excel(writer, sheet_name=sheet_name, index=False)
-                        print(f"  - {sheet_name}: {len(df)} rows")
-            
-            print(f"\nExcel report created successfully: {output_path}")
-            return output_path
-        
-        except Exception as e:
-            print(f"Error creating Excel report: {e}")
-            return None
-
+from core.power_utils import multi_node_power_analysis, RACK_91_COMPUTE_NODES, RACK_91_PD_NODES, RACK_97_COMPUTE_NODES, RACK_97_PDU_NODES
+from core.power_utils import get_compute_power_metrics, PDU_POWER_METRICS
 
 def main():
-    """Main function to run all rack-related queries"""
-    print("🚀 Rack Related Queries Runner (PDU & IRC)")
+    """Main function to run rack-related power queries and validation"""
+    print("🏗️ Rack Power Analysis and Validation Runner")
     print("=" * 60)
     print(f"📅 Started at: {datetime.now()}")
     print()
     
-    runner = RackRelatedQueryRunner()
+    # Get the last 24 hours
+    end_time = datetime.now()
+    start_time = end_time - timedelta(hours=24)
     
-    try:
-        # Connect to INFRA database
-        if not runner.connect_to_infra():
-            return
-        
-        # Get PDU metrics
-        pdu_data = runner.get_pdu_metrics(limit=1000)
-        
-        # Get IRC metrics
-        irc_data = runner.get_irc_metrics(limit=1000)
-        
-        # Get infrastructure analysis
-        analysis_data = runner.get_infrastructure_analysis()
-        
-        # Get time range analysis
-        time_range_data = runner.get_time_range_analysis(hours=24)
-        
-        # Create Excel report
-        print("\nCreating Excel report...")
-        output_file = runner.create_excel_report(
-            pdu_data, irc_data, analysis_data, time_range_data
-        )
-        
-        if output_file:
-            print(f"\nRack related queries report summary:")
-            print(f"  - PDU sheets: {len([k for k, v in pdu_data.items() if not v.empty])}")
-            print(f"  - IRC sheets: {len([k for k, v in irc_data.items() if not v.empty])}")
-            print(f"  - Analysis sheets: {len([k for k, v in analysis_data.items() if not v.empty])}")
-            print(f"  - Time range sheets: {len([k for k, v in time_range_data.items() if not v.empty])}")
-            print(f"  - Output file: {output_file}")
-            
-            # Print summary statistics
-            print(f"\nData summary:")
-            for sheet_name, df in pdu_data.items():
-                if not df.empty:
-                    print(f"  - {sheet_name}: {len(df)} rows, {len(df.columns)} columns")
-            
-            for sheet_name, df in irc_data.items():
-                if not df.empty:
-                    print(f"  - {sheet_name}: {len(df)} rows, {len(df.columns)} columns")
-            
-            for sheet_name, df in analysis_data.items():
-                if not df.empty:
-                    print(f"  - {sheet_name}: {len(df)} rows, {len(df.columns)} columns")
-            
-            for sheet_name, df in time_range_data.items():
-                if not df.empty:
-                    print(f"  - {sheet_name}: {len(df)} rows, {len(df.columns)} columns")
-        else:
-            print("Failed to create Excel report")
-        
-        print("✅ All rack-related queries completed successfully!")
-        
-    except KeyboardInterrupt:
-        print("\n⚠️  Interrupted by user")
-    except Exception as e:
-        print(f"\n❌ Error: {e}")
-    finally:
-        # Disconnect from database
-        runner.disconnect()
-        print(f"📅 Finished at: {datetime.now()}")
+    print(f"📊 Analyzing power data from {start_time} to {end_time}")
+    print()
+    
+    # Analyze Rack 97
+    print("🔧 Analyzing Rack 97...")
+    print("  📊 Computing nodes system input power...")
+    rack97_compute_results = multi_node_power_analysis(RACK_97_COMPUTE_NODES, start_time, end_time, ['systeminputpower'])
+    
+    print("  ⚡ PDU nodes power consumption...")
+    rack97_pdu_results = multi_node_power_analysis(RACK_97_PDU_NODES, start_time, end_time, PDU_POWER_METRICS)
+    
+    # Analyze Rack 91
+    print("🔧 Analyzing Rack 91...")
+    print("  📊 Computing nodes system input power...")
+    rack91_compute_results = multi_node_power_analysis(RACK_91_COMPUTE_NODES, start_time, end_time, ['systeminputpower'])
+    
+    print("  ⚡ PDU nodes power consumption...")
+    rack91_pdu_results = multi_node_power_analysis(RACK_91_PD_NODES, start_time, end_time, PDU_POWER_METRICS)
+    
+    # Save Rack 97 results
+    if rack97_compute_results or rack97_pdu_results:
+        print("💾 Saving Rack 97 results...")
+        save_rack_analysis("Rack97", rack97_compute_results, rack97_pdu_results, start_time)
+    
+    # Save Rack 91 results
+    if rack91_compute_results or rack91_pdu_results:
+        print("💾 Saving Rack 91 results...")
+        save_rack_analysis("Rack91", rack91_compute_results, rack91_pdu_results, start_time)
+    
+    print()
+    print("🎉 Rack analysis complete!")
+    print(f"📅 Finished at: {datetime.now()}")
 
+def save_rack_analysis(rack_name, compute_results, pdu_results, start_time):
+    """Save rack analysis results to Excel with validation summary"""
+    
+    # Create output directory
+    output_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'output')
+    os.makedirs(output_dir, exist_ok=True)
+    
+    filename = os.path.join(output_dir, f"{rack_name.lower()}_power_analysis_{start_time.strftime('%Y%m%d_%H%M%S')}.xlsx")
+    
+    with pd.ExcelWriter(filename, engine='openpyxl') as writer:
+        # Process compute nodes
+        compute_combined_data = []
+        compute_energy_summary = {}
+        total_compute_energy = 0
+        
+        if compute_results:
+            for hostname, (df, energy_dict) in compute_results.items():
+                if not df.empty:
+                    compute_combined_data.append(df)
+                    compute_energy_summary[hostname] = energy_dict
+                    # Sum up all energy for this compute node
+                    for metric, energy_kwh in energy_dict.items():
+                        total_compute_energy += energy_kwh
+        
+        # Process PDU nodes
+        pdu_combined_data = []
+        pdu_energy_summary = {}
+        total_pdu_energy = 0
+        
+        if pdu_results:
+            for hostname, (df, energy_dict) in pdu_results.items():
+                if not df.empty:
+                    pdu_combined_data.append(df)
+                    pdu_energy_summary[hostname] = energy_dict
+                    # Sum up all energy for this PDU node
+                    for metric, energy_kwh in energy_dict.items():
+                        total_pdu_energy += energy_kwh
+        
+        # Save compute nodes data
+        if compute_combined_data:
+            compute_combined_df = pd.concat(compute_combined_data, ignore_index=True)
+            
+            # Convert timezone-aware timestamps to timezone-naive for Excel compatibility
+            if 'timestamp' in compute_combined_df.columns:
+                compute_combined_df['timestamp'] = compute_combined_df['timestamp'].dt.tz_localize(None)
+            
+            compute_combined_df.to_excel(writer, sheet_name='Compute_Nodes', index=False)
+        
+        # Save PDU nodes data
+        if pdu_combined_data:
+            pdu_combined_df = pd.concat(pdu_combined_data, ignore_index=True)
+            
+            # Convert timezone-aware timestamps to timezone-naive for Excel compatibility
+            if 'timestamp' in pdu_combined_df.columns:
+                pdu_combined_df['timestamp'] = pdu_combined_df['timestamp'].dt.tz_localize(None)
+            
+            pdu_combined_df.to_excel(writer, sheet_name='PDU_Nodes', index=False)
+        
+        # Create validation summary
+        validation_data = []
+        
+        # Add compute nodes energy summary
+        for hostname, energy_dict in compute_energy_summary.items():
+            for metric, energy_kwh in energy_dict.items():
+                validation_data.append({
+                    'node_type': 'Compute',
+                    'hostname': hostname,
+                    'metric': metric,
+                    'total_energy_kwh': energy_kwh
+                })
+        
+        # Add PDU nodes energy summary
+        for hostname, energy_dict in pdu_energy_summary.items():
+            for metric, energy_kwh in energy_dict.items():
+                validation_data.append({
+                    'node_type': 'PDU',
+                    'hostname': hostname,
+                    'metric': metric,
+                    'total_energy_kwh': energy_kwh
+                })
+        
+        # Add totals
+        validation_data.append({
+            'node_type': 'TOTAL',
+            'hostname': f'{rack_name} Compute Total (SystemInputPower)',
+            'metric': 'systeminputpower',
+            'total_energy_kwh': total_compute_energy
+        })
+        
+        validation_data.append({
+            'node_type': 'TOTAL',
+            'hostname': f'{rack_name} PDU Total',
+            'metric': 'pdu',
+            'total_energy_kwh': total_pdu_energy
+        })
+        
+        # Calculate difference and percentage
+        if total_pdu_energy > 0:
+            energy_difference = total_compute_energy - total_pdu_energy
+            energy_percentage_diff = (energy_difference / total_pdu_energy) * 100
+            
+            validation_data.append({
+                'node_type': 'VALIDATION',
+                'hostname': 'Energy Difference (SystemInputPower - PDU)',
+                'metric': 'kWh',
+                'total_energy_kwh': energy_difference
+            })
+            
+            validation_data.append({
+                'node_type': 'VALIDATION',
+                'hostname': 'Percentage Difference',
+                'metric': '%',
+                'total_energy_kwh': energy_percentage_diff
+            })
+        
+        # Save validation summary
+        if validation_data:
+            validation_df = pd.DataFrame(validation_data)
+            validation_df.to_excel(writer, sheet_name='Validation_Summary', index=False)
+        
+        # Create power comparison chart data
+        comparison_data = []
+        if total_compute_energy > 0 and total_pdu_energy > 0:
+            comparison_data.append({
+                'Power_Source': 'SystemInputPower (Compute Nodes)',
+                'Total_Energy_kWh': total_compute_energy,
+                'Percentage_of_PDU': (total_compute_energy / total_pdu_energy) * 100
+            })
+            comparison_data.append({
+                'Power_Source': 'PDU Nodes',
+                'Total_Energy_kWh': total_pdu_energy,
+                'Percentage_of_PDU': 100.0
+            })
+        
+        if comparison_data:
+            comparison_df = pd.DataFrame(comparison_data)
+            comparison_df.to_excel(writer, sheet_name='Power_Comparison', index=False)
+    
+    print(f"✅ {rack_name} results saved to: {filename}")
+    print(f"   📈 Total SystemInputPower energy: {total_compute_energy:.2f} kWh")
+    print(f"   ⚡ Total PDU energy: {total_pdu_energy:.2f} kWh")
+    if total_pdu_energy > 0:
+        diff_percent = ((total_compute_energy - total_pdu_energy) / total_pdu_energy) * 100
+        print(f"   🔍 Energy difference: {diff_percent:.2f}%")
+        if abs(diff_percent) < 10:
+            print(f"   ✅ Power validation: GOOD (within 10% tolerance)")
+        elif abs(diff_percent) < 20:
+            print(f"   ⚠️ Power validation: ACCEPTABLE (within 20% tolerance)")
+        else:
+            print(f"   ❌ Power validation: NEEDS INVESTIGATION (>20% difference)")
 
 if __name__ == "__main__":
     main()

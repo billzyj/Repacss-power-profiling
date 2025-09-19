@@ -1,13 +1,13 @@
 # iDRAC Power and Temperature Queries for H100 and ZEN4 Databases
 
 # Unified API for getting power metrics with joins
-def get_power_metrics_with_joins(metric_id: str, node_id: str = None, start_time: str = None, end_time: str = None, limit: int = 100):
+def get_compute_metrics_with_joins(metric_id: str, hostname: str = None, start_time: str = None, end_time: str = None, limit: int = 100):
     """
     Unified API to get power metrics from any iDRAC table with cross joins to get hostname, source name, and fqdd name.
     
     Args:
         metric_id: Metric ID from public.metrics_definition (will be converted to lowercase for idrac table name)
-        node_id: Optional node ID to filter by. If None, returns data for all nodes
+        hostname: Optional hostname to filter by (resolved via public.nodes). If None, returns data for all nodes
         start_time: Optional start timestamp for time range filter
         end_time: Optional end timestamp for time range filter
         limit: Number of records to return (default: 100, only applied when no time range is specified)
@@ -27,8 +27,9 @@ def get_power_metrics_with_joins(metric_id: str, node_id: str = None, start_time
     # Build WHERE clause based on provided parameters
     where_conditions = []
     
-    if node_id is not None:
-        where_conditions.append(f"p.nodeid = '{node_id}'")
+    if hostname is not None:
+        # Filter by hostname via join to public.nodes (n)
+        where_conditions.append(f"n.hostname = '{hostname}'")
     
     # Handle time filtering with proper corner cases
     if start_time is not None and end_time is not None:
@@ -65,7 +66,7 @@ def get_power_metrics_with_joins(metric_id: str, node_id: str = None, start_time
     LEFT JOIN public.fqdd f ON p.fqdd = f.id
     LEFT JOIN public.metrics_definition m ON LOWER(m.metric_id) = LOWER('{metric_id}')
     {where_clause}
-    ORDER BY p.timestamp DESC
+    ORDER BY p.timestamp ASC
     {limit_clause};
     """
 

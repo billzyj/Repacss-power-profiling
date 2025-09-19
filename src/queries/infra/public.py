@@ -91,18 +91,3 @@ FROM public.metrics_definition
 WHERE metric_id LIKE '%Pressure%' OR units IN ('Pa', 'kPa', 'bar', 'psi')
 ORDER BY metric_id;
 """
-
-
-# Get nodes with their available IRC metrics
-NODES_WITH_METRICS = """
-SELECT 
-    n.nodeid,
-    n.hostname,
-    n.ip_addr,
-    COUNT(md.metric_id) as available_metrics,
-    STRING_AGG(md.metric_id, ', ' ORDER BY md.metric_id) as metrics
-FROM public.nodes n
-LEFT JOIN public.metrics_definition md ON 1=1  -- Cross join to get all IRC metrics
-GROUP BY n.nodeid, n.hostname, n.ip_addr
-ORDER BY n.nodeid;
-"""
