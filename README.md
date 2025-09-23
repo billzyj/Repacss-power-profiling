@@ -18,6 +18,9 @@ This project provides a Python client to connect to the REPACSS TimescaleDB and 
 - Real-time power monitoring across multiple nodes
 - Infrastructure monitoring (PDU, IRC, compressors, airflow)
 - **Excel report generation** with comprehensive power metrics from all databases
+- **Comprehensive rack power analysis** for all racks (91-97) with validation
+- **Power consumption validation** comparing compute nodes vs PDU measurements
+- **Smart power estimation** for unmeasured components (switches, AMD nodes, etc.)
 
 ## Quick Start
 
@@ -53,6 +56,33 @@ python src/scripts/run_public_queries.py
 ```
 
 This will create an Excel file with comprehensive power metrics from all databases.
+
+### 5. Run Comprehensive Rack Analysis
+
+```bash
+python src/scripts/run_rack_related_queries.py
+```
+
+This will analyze all racks (91-97) with power validation and save results to `output/rack/` directory.
+
+## Available Scripts
+
+### Power Analysis Scripts
+
+- **`run_rack_related_queries.py`**: Comprehensive rack power analysis for all racks (91-97)
+- **`run_public_queries.py`**: General power metrics from all databases
+- **`run_node_level_queries.py`**: Individual node power analysis
+- **`run_irc_pdu_power_queries.py`**: Infrastructure power analysis (PDU, IRC)
+- **`run_h100_power_queries.py`**: H100 GPU power analysis
+- **`run_zen4_power_queries.py`**: Zen4 CPU power analysis
+
+### Analysis Types
+
+- **Rack Analysis**: Multi-rack power validation with estimation
+- **Node Analysis**: Individual node power consumption tracking
+- **Infrastructure Analysis**: PDU and cooling system power monitoring
+- **GPU Analysis**: H100 GPU power consumption
+- **CPU Analysis**: Zen4 CPU power consumption
 
 ## Basic Usage
 
@@ -142,6 +172,48 @@ The analysis returns a DataFrame with the following columns:
 - **Compute Nodes** (rpg-*, rpc-*): Automatically queries all power-related metrics from database
 - **PDU Nodes** (pdu-*): Uses predefined PDU power metrics
 - **IRC Nodes** (irc-*): Uses predefined IRC power metrics (CompressorPower, CondenserFanPower, etc.)
+
+## Rack Power Analysis
+
+The system provides comprehensive rack-level power analysis with validation across all racks (91-97):
+
+### Rack Analysis Types
+
+- **Rack 97 (Accurate)**: Direct comparison between compute nodes and PDU measurements
+- **Racks 91, 94, 96 (Estimated Switches)**: Includes 2kW estimation for ethernet + infiniband switches
+- **Rack 92 (Estimated AMD)**: Includes 1kW estimation for 2 AMD test nodes
+- **Rack 93 (Estimated Mixed)**: Includes 3kW estimation for multiple components
+- **Rack 95 (Estimated Switches)**: Includes 4kW estimation for switches + hammerspace nodes
+
+### Analysis Features
+
+- **Power Validation**: Compares compute node power consumption with PDU measurements
+- **Energy Calculation**: Tracks total energy consumption over time periods
+- **Smart Estimation**: Accounts for unmeasured components (switches, additional nodes)
+- **Excel Reports**: Generates comprehensive reports with validation summaries
+- **Multiple Sheets**: Separate sheets for compute nodes, PDU nodes, validation, and power comparison
+
+### Output Structure
+
+```
+output/rack/
+├── rack91_power_analysis_20250910_000000.xlsx
+├── rack92_power_analysis_20250910_000000.xlsx
+├── rack93_power_analysis_20250910_000000.xlsx
+├── rack94_power_analysis_20250910_000000.xlsx
+├── rack95_power_analysis_20250910_000000.xlsx
+├── rack96_power_analysis_20250910_000000.xlsx
+└── rack97_power_analysis_20250910_000000.xlsx
+```
+
+### Validation Logic
+
+- **Accurate Analysis (Rack 97)**: Direct compute vs PDU comparison
+- **Estimated Analysis**: Shows both raw and adjusted differences
+- **Tolerance Levels**: 
+  - ✅ GOOD: Within 10% difference
+  - ⚠️ ACCEPTABLE: Within 20% difference  
+  - ❌ NEEDS INVESTIGATION: >20% difference
 
 ## Documentation
 
