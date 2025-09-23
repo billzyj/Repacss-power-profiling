@@ -82,8 +82,8 @@ def main():
     print()
     
     # Set specific date range for analysis
-    start_time = datetime(2025, 9, 10, 0, 0, 0)
-    end_time = datetime(2025, 9, 11, 0, 0, 0)
+    start_time = datetime(2025, 9, 12, 0, 0, 0)
+    end_time = datetime(2025, 9, 14, 0, 0, 0)
     
     print(f"📊 Analyzing power data from {start_time.strftime('%Y-%m-%d %H:%M:%S')} to {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
     print()

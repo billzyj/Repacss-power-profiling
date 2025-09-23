@@ -9,16 +9,24 @@ import os
 import pandas as pd
 from datetime import datetime, timedelta
 from typing import Dict, List
+import matplotlib.pyplot as plt
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from queries.compute.idrac import *
+from queries.compute.idrac import get_compute_metrics_with_joins
 from core.database import (
     connect_to_database,
     disconnect_all
 )
-from core.power_utils import create_power_query_with_conversion
+from core.power_utils import create_power_query_with_conversion, compute_energy_kwh_for_hostname
+
+# Define metric constants (GPU omitted for Zen4)
+CPU_METRICS = ['CPUPower', 'PkgPwr', 'TotalCPUPower']
+MEMORY_METRICS = ['DRAMPwr', 'TotalMemoryPower']
+FAN_METRICS = ['TotalFanPower']
+STORAGE_METRICS = ['TotalStoragePower']
+SYSTEM_METRICS = ['SystemInputPower','SystemOutputPower', 'SystemPowerConsumption', 'WattsReading']
 
 
 class Zen4PowerQueryRunner:
@@ -72,14 +80,11 @@ class Zen4PowerQueryRunner:
             
             print(f"  - Found {len(power_metrics)} power metrics to process")
             
-            # Process each power metric
+            # Process each power metric (using idrac API)
             for metric in power_metrics:
                 try:
-                    # Create a modified query with intelligent power conversion
-                    base_query = get_power_metrics_with_joins(metric, limit=limit)
-                    modified_query = create_power_query_with_conversion(base_query, metric)
-                    
-                    df = pd.read_sql_query(modified_query, self.client.db_connection)
+                    query = get_compute_metrics_with_joins(metric_id=metric, limit=limit)
+                    df = pd.read_sql_query(query, self.client.db_connection)
                     
                     if not df.empty:
                         # Convert timestamp to timezone-unaware for Excel compatibility
@@ -103,53 +108,148 @@ class Zen4PowerQueryRunner:
             print(f"Error getting ZEN4 power metrics: {e}")
             return {}
     
-    def get_power_analysis(self):
-        """Get ZEN4 power analysis queries"""
+    def get_comprehensive_metric_analysis(self, start_time: datetime, end_time: datetime):
+        """Get comprehensive metric analysis for ZEN4 node rpc-91-1 (GPU omitted)"""
         try:
-            print("📊 Collecting ZEN4 power analysis...")
-            
+            print(f"📊 Collecting ZEN4 comprehensive metric analysis...")
             results = {}
-            
-            # Node power comparison
-            df_node_comparison = pd.read_sql_query(
-                NODE_POWER_COMPARISON,
-                self.client.db_connection
-            )
-            results['ZEN4_Node_Power_Comparison'] = df_node_comparison
-            
-            # Power efficiency analysis
-            df_efficiency = pd.read_sql_query(
-                POWER_EFFICIENCY_ANALYSIS,
-                self.client.db_connection
-            )
-            results['ZEN4_Power_Efficiency_Analysis'] = df_efficiency
-            
-            # Power consumption trends
-            df_consumption_trends = pd.read_sql_query(
-                POWER_CONSUMPTION_TRENDS,
-                self.client.db_connection
-            )
-            results['ZEN4_Power_Consumption_Trends'] = df_consumption_trends
-            
-            # High power usage alerts
-            df_high_power = pd.read_sql_query(
-                HIGH_POWER_USAGE_ALERTS,
-                self.client.db_connection
-            )
-            results['ZEN4_High_Power_Usage_Alerts'] = df_high_power
-            
-            # Power efficiency by node
-            df_efficiency_by_node = pd.read_sql_query(
-                POWER_EFFICIENCY_BY_NODE,
-                self.client.db_connection
-            )
-            results['ZEN4_Power_Efficiency_By_Node'] = df_efficiency_by_node
+            hostname = 'rpc-91-1'
+
+            all_metrics = {
+                'CPU': CPU_METRICS,
+                'MEMORY': MEMORY_METRICS,
+                'FAN': FAN_METRICS,
+                'STORAGE': STORAGE_METRICS,
+                'SYSTEM': SYSTEM_METRICS
+            }
+
+            metric_data: Dict[str, Dict[str, pd.DataFrame]] = {}
+            energy_analysis: Dict[str, Dict[str, float]] = {}
+
+            for category, metrics in all_metrics.items():
+                print(f"  📈 Processing {category} metrics...")
+                category_data: Dict[str, pd.DataFrame] = {}
+                category_energy: Dict[str, float] = {}
+
+                for metric in metrics:
+                    query = get_compute_metrics_with_joins(
+                        metric_id=metric,
+                        hostname=hostname,
+                        start_time=start_time.strftime('%Y-%m-%d %H:%M:%S'),
+                        end_time=end_time.strftime('%Y-%m-%d %H:%M:%S')
+                    )
+                    try:
+                        df = pd.read_sql_query(query, self.client.db_connection)
+                        if not df.empty:
+                            # Normalize timestamps for energy integration
+                            df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce', utc=True)
+                            df = df.dropna(subset=['timestamp']).sort_values('timestamp')
+                            # Keep a DatetimeIndex to satisfy any resample operations
+                            df = df.set_index('timestamp').reset_index()
+                            # Excel compatibility: make timestamps timezone-naive
+                            if 'timestamp' in df.columns:
+                                df['timestamp'] = df['timestamp'].dt.tz_localize(None)
+                            expected_cols = ['timestamp','hostname','source','fqdd','value','units']
+                            for col in expected_cols:
+                                if col not in df.columns:
+                                    df[col] = None if col in ['source','fqdd','units'] else hostname
+
+                            df['metric'] = metric
+                            category_data[metric] = df
+
+                            unit_str = (df['units'].iloc[0] if 'units' in df.columns and df['units'].notna().any() else 'W')
+                            energy = compute_energy_kwh_for_hostname(
+                                df, unit_str, hostname,
+                                start_time.strftime('%Y-%m-%d %H:%M:%S'),
+                                end_time.strftime('%Y-%m-%d %H:%M:%S')
+                            )
+                            category_energy[metric] = energy
+                            print(f"    ✓ {metric}: {len(df)} rows, Energy: {energy:.3f} kWh")
+                        else:
+                            print(f"    ⚠️ {metric}: No data found")
+                    except Exception as e:
+                        print(f"    ❌ Error processing {metric}: {e}")
+                        continue
+
+                metric_data[category] = category_data
+                energy_analysis[category] = category_energy
+
+            # Build component totals (prefer TOTAL metrics where available)
+            def pick_total_or_sum(cat: str, total_prefix: str) -> float:
+                for key, val in energy_analysis.get(cat, {}).items():
+                    if key.lower().startswith(total_prefix.lower()):
+                        return val
+                return sum(energy_analysis.get(cat, {}).values())
+
+            cpu_total = pick_total_or_sum('CPU', 'TotalCPUPower')
+            mem_total = pick_total_or_sum('MEMORY', 'TotalMemoryPower')
+            fan_total = pick_total_or_sum('FAN', 'TotalFanPower')
+            storage_total = pick_total_or_sum('STORAGE', 'TotalStoragePower')
+            system_output = energy_analysis.get('SYSTEM', {}).get('SystemOutputPower', 0.0)
+
+            component_rows = [
+                {'component':'CPU','energy_kwh':cpu_total},
+                {'component':'MEMORY','energy_kwh':mem_total},
+                {'component':'FAN','energy_kwh':fan_total},
+                {'component':'STORAGE','energy_kwh':storage_total},
+                {'component':'SystemOutputPower','energy_kwh':system_output},
+            ]
+            comp_df = pd.DataFrame(component_rows)
+
+            # Top-level pie (no GPU): CPU, MEM, FAN, STORAGE, Other
+            comp_sum = cpu_total + mem_total + fan_total + storage_total
+            other_val = max(system_output - comp_sum, 0.0)
+            top_pie_df = pd.DataFrame([
+                {'component':'CPU','energy_kwh':cpu_total},
+                {'component':'MEMORY','energy_kwh':mem_total},
+                {'component':'FAN','energy_kwh':fan_total},
+                {'component':'STORAGE','energy_kwh':storage_total},
+                {'component':'Other','energy_kwh':other_val},
+            ])
+
+            # CPU FQDD pie
+            cpu_fqdd_rows = []
+            for metric, energy in energy_analysis.get('CPU', {}).items():
+                if metric.startswith('CPUPower_FQDD_'):
+                    fq = metric.split('_')[-1]
+                    cpu_fqdd_rows.append({'component': f'CPU (fqdd={fq})', 'energy_kwh': energy})
+            cpu_pie_df = pd.DataFrame(cpu_fqdd_rows)
+
+            # Save pie (top-level only)
+            pie_path = None
+            try:
+                plt.figure(figsize=(10, 7))
+                labels_top = top_pie_df['component'].tolist()
+                sizes_top = top_pie_df['energy_kwh'].tolist()
+                if sum(sizes_top) == 0:
+                    sizes_top = [1 for _ in sizes_top]
+                plt.pie(sizes_top, labels=labels_top, autopct='%1.1f%%', startangle=140)
+                plt.title('ZEN4 Top-level Energy Share (rpc-91-1)')
+                plt.axis('equal')
+
+                output_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'output', 'zen4')
+                os.makedirs(output_dir, exist_ok=True)
+                pie_filename = f"zen4_component_breakdown_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                pie_path = os.path.join(output_dir, pie_filename)
+                plt.savefig(pie_path, bbox_inches='tight')
+                plt.close()
+            except Exception as e:
+                print(f"⚠️ Failed to create/save ZEN4 component pie chart: {e}")
+
+            results['Metric_Data'] = metric_data
+            results['Energy_Analysis'] = energy_analysis
+            results['Component_Breakdown'] = comp_df
+            results['Component_Pie_Path'] = pie_path
             
             return results
-            
         except Exception as e:
-            print(f"Error getting ZEN4 power analysis: {e}")
+            print(f"Error getting ZEN4 comprehensive metric analysis: {e}")
             return {}
+    
+    def get_power_analysis(self):
+        """Kept for compatibility; returns empty for simplified flow"""
+        print("📊 Skipping legacy ZEN4 power analysis (using comprehensive analysis instead)...")
+        return {}
     
     def get_time_range_analysis(self, hours: int = 24):
         """Get ZEN4 time range power analysis"""
@@ -346,6 +446,11 @@ def main():
     print(f"📅 Started at: {datetime.now()}")
     print()
     
+    # Time window to match H100 analysis
+    start_time = datetime(2025, 9, 1, 0, 0, 0)
+    end_time = datetime(2025, 9, 2, 0, 0, 0)
+    print(f"📊 Analyzing ZEN4 power data from {start_time.strftime('%Y-%m-%d %H:%M:%S')} to {end_time.strftime('%Y-%m-%d %H:%M:%S')} (rpc-91-1)")
+    
     runner = Zen4PowerQueryRunner()
     
     try:
@@ -353,53 +458,45 @@ def main():
         if not runner.connect_to_zen4():
             return
         
-        # Get power metrics
-        power_metrics = runner.get_power_metrics(limit=1000)
+        # Comprehensive metric analysis (GPU omitted)
+        comp = runner.get_comprehensive_metric_analysis(start_time, end_time)
         
-        # Get power analysis
-        power_analysis = runner.get_power_analysis()
+        # Minimal time-range and recent sections can be skipped; focus on comprehensive output
+        print("\nCreating ZEN4 comprehensive report...")
+        # Reuse H100-style exporter pattern: write a small Excel with breakdown
+        output_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'output', 'zen4')
+        os.makedirs(output_dir, exist_ok=True)
+        excel_path = os.path.join(output_dir, f"zen4_comprehensive_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
+        with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+            # Component breakdown
+            if comp.get('Component_Breakdown') is not None and not comp['Component_Breakdown'].empty:
+                comp['Component_Breakdown'].to_excel(writer, sheet_name='Component_Breakdown', index=False)
+            # Raw metric data
+            for cat, items in comp.get('Metric_Data', {}).items():
+                for name, df in items.items():
+                    if not df.empty:
+                        # Ensure timezone-naive timestamps for Excel
+                        if 'timestamp' in df.columns:
+                            try:
+                                df = df.copy()
+                                df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+                                df['timestamp'] = df['timestamp'].dt.tz_localize(None)
+                            except Exception:
+                                pass
+                        df.to_excel(writer, sheet_name=(f"{cat}_{name}")[:31], index=False)
+            # Energy analysis
+            if comp.get('Energy_Analysis'):
+                rows = []
+                for cat, items in comp['Energy_Analysis'].items():
+                    for name, val in items.items():
+                        rows.append({'category':cat, 'metric':name, 'energy_kwh':val})
+                pd.DataFrame(rows).to_excel(writer, sheet_name='Energy_Summary', index=False)
+
+        print(f"  - Excel saved: {excel_path}")
+        if comp.get('Component_Pie_Path'):
+            print(f"  - Pie chart saved: {comp['Component_Pie_Path']}")
         
-        # Get time range analysis
-        time_range_data = runner.get_time_range_analysis(hours=24)
-        
-        # Get recent power data
-        recent_data = runner.get_recent_power_data(limit=100)
-        
-        # Create Excel report
-        print("\nCreating Excel report...")
-        output_file = runner.create_excel_report(
-            power_metrics, power_analysis, time_range_data, recent_data
-        )
-        
-        if output_file:
-            print(f"\nZEN4 power queries report summary:")
-            print(f"  - Power metrics sheets: {len([k for k, v in power_metrics.items() if not v.empty])}")
-            print(f"  - Power analysis sheets: {len([k for k, v in power_analysis.items() if not v.empty])}")
-            print(f"  - Time range sheets: {len([k for k, v in time_range_data.items() if not v.empty])}")
-            print(f"  - Recent data sheets: {len([k for k, v in recent_data.items() if not v.empty])}")
-            print(f"  - Output file: {output_file}")
-            
-            # Print summary statistics
-            print(f"\nData summary:")
-            for sheet_name, df in power_metrics.items():
-                if not df.empty:
-                    print(f"  - {sheet_name}: {len(df)} rows, {len(df.columns)} columns")
-            
-            for sheet_name, df in power_analysis.items():
-                if not df.empty:
-                    print(f"  - {sheet_name}: {len(df)} rows, {len(df.columns)} columns")
-            
-            for sheet_name, df in time_range_data.items():
-                if not df.empty:
-                    print(f"  - {sheet_name}: {len(df)} rows, {len(df.columns)} columns")
-            
-            for sheet_name, df in recent_data.items():
-                if not df.empty:
-                    print(f"  - {sheet_name}: {len(df)} rows, {len(df.columns)} columns")
-        else:
-            print("Failed to create Excel report")
-        
-        print("✅ All ZEN4 power queries completed successfully!")
+        print("✅ ZEN4 comprehensive analysis completed successfully!")
         
     except KeyboardInterrupt:
         print("\n⚠️  Interrupted by user")

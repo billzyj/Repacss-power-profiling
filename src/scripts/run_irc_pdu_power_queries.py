@@ -21,11 +21,11 @@ def main():
     print(f"📅 Started at: {datetime.now()}")
     print()
     
-    # Get the last 24 hours
-    end_time = datetime.now()
-    start_time = end_time - timedelta(hours=24)
+    # Use specific time period (08/15/2025 00:00:00 to 09/01/2025 00:00:00)
+    start_time = datetime(2025, 8, 15, 0, 0, 0)
+    end_time = datetime(2025, 8, 21, 0, 0, 0)
     
-    print(f"📊 Analyzing power data from {start_time} to {end_time}")
+    print(f"📊 Analyzing power data from {start_time.strftime('%Y-%m-%d %H:%M:%S')} to {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
     print()
     
     # Analyze IRC nodes
@@ -54,8 +54,8 @@ def main():
             if 'timestamp' in irc_combined_df.columns:
                 irc_combined_df['timestamp'] = irc_combined_df['timestamp'].dt.tz_localize(None)
             
-            # Save to Excel in output folder
-            output_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'output')
+            # Save to Excel in output/irc_pdu folder
+            output_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'output', 'irc_pdu')
             os.makedirs(output_dir, exist_ok=True)
             irc_filename = os.path.join(output_dir, f"irc_power_analysis_{start_time.strftime('%Y%m%d_%H%M%S')}.xlsx")
             with pd.ExcelWriter(irc_filename, engine='openpyxl') as writer:
@@ -121,8 +121,8 @@ def main():
             if 'timestamp' in pdu_combined_df.columns:
                 pdu_combined_df['timestamp'] = pdu_combined_df['timestamp'].dt.tz_localize(None)
             
-            # Save to Excel in output folder
-            output_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'output')
+            # Save to Excel in output/irc_pdu folder
+            output_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'output', 'irc_pdu')
             os.makedirs(output_dir, exist_ok=True)
             pdu_filename = os.path.join(output_dir, f"pdu_power_analysis_{start_time.strftime('%Y%m%d_%H%M%S')}.xlsx")
             with pd.ExcelWriter(pdu_filename, engine='openpyxl') as writer:
