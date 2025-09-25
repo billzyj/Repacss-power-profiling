@@ -8,8 +8,8 @@ import sys
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.client import REPACSSPowerClient, DatabaseConfig, SSHConfig
-from core.config import config
+from src.database.client import REPACSSPowerClient, DatabaseConfig, SSHConfig
+from src.database.config.config import config
 
 def test_connection():
     """Test the SSH tunnel and database connection"""

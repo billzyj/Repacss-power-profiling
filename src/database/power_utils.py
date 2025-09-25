@@ -8,7 +8,7 @@ from typing import List, Dict
 import pandas as pd
 from queries.compute.idrac import get_compute_metrics_with_joins
 from queries.infra.irc_pdu import get_irc_metrics_with_joins, get_pdu_metrics_with_joins
-from core.database import get_raw_database_connection
+from database.database import get_raw_database_connection
 
 # Metrics to exclude from graphs (not power consumption)
 EXCLUDED_METRICS = [

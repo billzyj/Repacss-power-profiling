@@ -9,7 +9,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from queries.compute.public import *
 from queries.infra.public import *
-from core.database import (
+from database.database import (
     connect_to_database, 
     disconnect_all,
     get_client

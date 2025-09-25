@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.database import (
+from src.database.database import (
     connect_to_database,
     connect_to_all_databases,
     disconnect_all,
@@ -18,7 +18,7 @@ from core.database import (
     get_all_clients,
     create_client_for_database
 )
-from core.config import config
+from src.database.config.config import config
 
 
 def single_database_example():

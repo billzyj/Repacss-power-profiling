@@ -1,0 +1,37 @@
+# Testing dependencies for REPACSS Power Profiling
+# Install with: pip install -r tests/requirements-test.txt
+
+# Core testing framework
+pytest>=7.0.0
+pytest-cov>=4.0.0
+pytest-mock>=3.10.0
+pytest-xdist>=3.0.0  # Parallel test execution
+
+# Test data and fixtures
+pandas>=1.5.0
+numpy>=1.21.0
+
+# Mocking and test utilities
+unittest-mock>=1.0.0
+freezegun>=1.2.0  # Time mocking
+
+# Coverage reporting
+coverage>=6.0.0
+pytest-html>=3.1.0  # HTML test reports
+
+# Performance testing
+pytest-benchmark>=4.0.0
+
+# Database testing
+pytest-postgresql>=4.1.0  # PostgreSQL test database
+pytest-mysql>=2.0.0  # MySQL test database (if needed)
+
+# SSH testing
+paramiko>=2.10.0
+sshtunnel>=0.4.0
+
+# CLI testing
+click-testing>=0.1.0
+
+# Data validation
+pandera>=0.17.0  # DataFrame validation

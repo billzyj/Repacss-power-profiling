@@ -6,7 +6,7 @@ Provides shared functionality for connecting to multiple databases
 
 from typing import Dict, List, Optional
 from .client import REPACSSPowerClient, DatabaseConfig, SSHConfig
-from .config import config
+from .config.config import config
 
 
 class DatabaseConnectionManager:
@@ -18,11 +18,8 @@ class DatabaseConnectionManager:
     
     def create_client_for_database(self, database_name: str, schema: str = None) -> REPACSSPowerClient:
         """Create a client instance for a specific database and schema"""
-        db_config_dict = config.get_database_config(database_name, schema)
-        ssh_config_dict = config.get_ssh_config()
-        
-        db_config = DatabaseConfig(**db_config_dict)
-        ssh_config = SSHConfig(**ssh_config_dict)
+        db_config = config.get_database_config(database_name, schema)
+        ssh_config = config.get_ssh_config()
         
         return REPACSSPowerClient(db_config, ssh_config, schema=db_config.schema)
     

@@ -10,16 +10,18 @@ import pandas as pd
 from datetime import datetime, timedelta
 from typing import Dict, List
 import matplotlib.pyplot as plt
+import argparse
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from queries.compute.idrac import get_compute_metrics_with_joins
-from core.database import (
+from database.database import (
     connect_to_database,
     disconnect_all
 )
-from core.power_utils import create_power_query_with_conversion, compute_energy_kwh_for_hostname
+from utils.query_helpers import create_power_query_with_conversion
+from analysis.energy import compute_energy_kwh_for_hostname
 
 # Define metric constants (GPU omitted for Zen4)
 CPU_METRICS = ['CPUPower', 'PkgPwr', 'TotalCPUPower']
@@ -246,6 +248,112 @@ class Zen4PowerQueryRunner:
             print(f"Error getting ZEN4 comprehensive metric analysis: {e}")
             return {}
     
+    def get_idle_power_analysis(self, start_time: datetime, end_time: datetime, hostname: str = 'rpc-91-1', metrics: List[str] = None):
+        """Analyze idle/static power as lower 3% of non-zero readings per metric (ZEN4).
+
+        - Scans between start_time and end_time for the specified hostname
+        - Computes 3rd percentile (p3_value), mean of bottom 3% (lower3_mean), min_nonzero
+        - Emits per-FQDD rows when present and a TOTAL series (time-summed across FQDDs)
+        - No energy computations
+        """
+        try:
+            print(f"📊 Collecting ZEN4 idle power between {start_time.strftime('%Y-%m-%d %H:%M:%S')} and {end_time.strftime('%Y-%m-%d %H:%M:%S')} for {hostname}...")
+
+            if metrics is None:
+                base_metrics = set(CPU_METRICS + MEMORY_METRICS + FAN_METRICS + STORAGE_METRICS + SYSTEM_METRICS)
+                metrics = sorted(base_metrics)
+
+            rows: List[Dict] = []
+
+            for metric in metrics:
+                try:
+                    query = get_compute_metrics_with_joins(
+                        metric_id=metric,
+                        hostname=hostname,
+                        start_time=start_time.strftime('%Y-%m-%d %H:%M:%S'),
+                        end_time=end_time.strftime('%Y-%m-%d %H:%M:%S')
+                    )
+                    df_metric = pd.read_sql_query(query, self.client.db_connection)
+
+                    if df_metric.empty or 'value' not in df_metric.columns:
+                        print(f"  - {metric}: No data")
+                        continue
+
+                    if 'timestamp' in df_metric.columns:
+                        df_metric['timestamp'] = df_metric['timestamp'].dt.tz_localize(None)
+
+                    def compute_idle(values: pd.Series) -> Dict[str, float]:
+                        nonzero = values[values > 0]
+                        if nonzero.empty:
+                            return {
+                                'p3_value': 0.0,
+                                'lower3_mean': 0.0,
+                                'min_nonzero': 0.0,
+                                'sample_count': int(values.shape[0]),
+                                'samples_in_lower3': 0
+                            }
+                        p3 = float(nonzero.quantile(0.03))
+                        lower_tail = nonzero[nonzero <= p3]
+                        return {
+                            'p3_value': p3,
+                            'lower3_mean': float(lower_tail.mean()) if not lower_tail.empty else 0.0,
+                            'min_nonzero': float(nonzero.min()),
+                            'sample_count': int(values.shape[0]),
+                            'samples_in_lower3': int(lower_tail.shape[0])
+                        }
+
+                    units = None
+                    if 'units' in df_metric.columns and df_metric['units'].notna().any():
+                        units = df_metric['units'].dropna().iloc[0]
+
+                    has_fqdd = ('fqdd' in df_metric.columns and df_metric['fqdd'].notna().any())
+                    if has_fqdd:
+                        for fq in df_metric['fqdd'].dropna().unique():
+                            fq_df = df_metric[df_metric['fqdd'] == fq]
+                            stats = compute_idle(fq_df['value'])
+                            rows.append({
+                                'metric': metric,
+                                'hostname': hostname,
+                                'fqdd': str(fq),
+                                'units': units,
+                                **stats
+                            })
+
+                        df_total = df_metric.groupby('timestamp', as_index=False)['value'].sum()
+                        stats_total = compute_idle(df_total['value'])
+                        rows.append({
+                            'metric': metric,
+                            'hostname': hostname,
+                            'fqdd': 'TOTAL',
+                            'units': units,
+                            **stats_total
+                        })
+                    else:
+                        stats = compute_idle(df_metric['value'])
+                        rows.append({
+                            'metric': metric,
+                            'hostname': hostname,
+                            'fqdd': None,
+                            'units': units,
+                            **stats
+                        })
+
+                    last = rows[-1]
+                    print(f"  - {metric} (fqdd={last['fqdd'] if last['fqdd'] is not None else 'N/A'}): p3={last['p3_value']:.3f} {units or ''}, mean_low3={last['lower3_mean']:.3f}")
+
+                except Exception as e:
+                    print(f"  - Error processing {metric}: {e}")
+                    continue
+
+            result_df = pd.DataFrame(rows, columns=[
+                'metric','hostname','fqdd','units','p3_value','lower3_mean','min_nonzero','sample_count','samples_in_lower3'
+            ])
+            return {'ZEN4_Idle_Power': result_df}
+
+        except Exception as e:
+            print(f"Error getting ZEN4 idle power analysis: {e}")
+            return {}
+
     def get_power_analysis(self):
         """Kept for compatibility; returns empty for simplified flow"""
         print("📊 Skipping legacy ZEN4 power analysis (using comprehensive analysis instead)...")
@@ -374,6 +482,104 @@ class Zen4PowerQueryRunner:
         except Exception as e:
             print(f"Error getting recent ZEN4 power data: {e}")
             return {}
+
+    def get_peak_power_analysis(self, start_time: datetime, end_time: datetime, hostname: str = 'rpc-91-1', metrics: List[str] = None):
+        """Analyze peak power as the top 3% of non-zero readings per metric (ZEN4)."""
+        try:
+            print(f"📊 Collecting ZEN4 peak power between {start_time.strftime('%Y-%m-%d %H:%M:%S')} and {end_time.strftime('%Y-%m-%d %H:%M:%S')} for {hostname}...")
+
+            if metrics is None:
+                base_metrics = set(CPU_METRICS + MEMORY_METRICS + FAN_METRICS + STORAGE_METRICS + SYSTEM_METRICS)
+                metrics = sorted(base_metrics)
+
+            rows: List[Dict] = []
+
+            for metric in metrics:
+                try:
+                    query = get_compute_metrics_with_joins(
+                        metric_id=metric,
+                        hostname=hostname,
+                        start_time=start_time.strftime('%Y-%m-%d %H:%M:%S'),
+                        end_time=end_time.strftime('%Y-%m-%d %H:%M:%S')
+                    )
+                    df_metric = pd.read_sql_query(query, self.client.db_connection)
+
+                    if df_metric.empty or 'value' not in df_metric.columns:
+                        print(f"  - {metric}: No data")
+                        continue
+
+                    if 'timestamp' in df_metric.columns:
+                        df_metric['timestamp'] = df_metric['timestamp'].dt.tz_localize(None)
+
+                    def compute_peak(values: pd.Series) -> Dict[str, float]:
+                        nonzero = values[values > 0]
+                        if nonzero.empty:
+                            return {
+                                'p97_value': 0.0,
+                                'upper3_mean': 0.0,
+                                'max_value': 0.0,
+                                'sample_count': int(values.shape[0]),
+                                'samples_in_upper3': 0
+                            }
+                        p97 = float(nonzero.quantile(0.97))
+                        upper_tail = nonzero[nonzero >= p97]
+                        return {
+                            'p97_value': p97,
+                            'upper3_mean': float(upper_tail.mean()) if not upper_tail.empty else 0.0,
+                            'max_value': float(nonzero.max()),
+                            'sample_count': int(values.shape[0]),
+                            'samples_in_upper3': int(upper_tail.shape[0])
+                        }
+
+                    units = None
+                    if 'units' in df_metric.columns and df_metric['units'].notna().any():
+                        units = df_metric['units'].dropna().iloc[0]
+
+                    has_fqdd = ('fqdd' in df_metric.columns and df_metric['fqdd'].notna().any())
+                    if has_fqdd:
+                        for fq in df_metric['fqdd'].dropna().unique():
+                            fq_df = df_metric[df_metric['fqdd'] == fq]
+                            stats = compute_peak(fq_df['value'])
+                            rows.append({
+                                'metric': metric,
+                                'hostname': hostname,
+                                'fqdd': str(fq),
+                                'units': units,
+                                **stats
+                            })
+
+                        df_total = df_metric.groupby('timestamp', as_index=False)['value'].sum()
+                        stats_total = compute_peak(df_total['value'])
+                        rows.append({
+                            'metric': metric,
+                            'hostname': hostname,
+                            'fqdd': 'TOTAL',
+                            'units': units,
+                            **stats_total
+                        })
+                    else:
+                        stats = compute_peak(df_metric['value'])
+                        rows.append({
+                            'metric': metric,
+                            'hostname': hostname,
+                            'fqdd': None,
+                            'units': units,
+                            **stats
+                        })
+
+                    last = rows[-1]
+                    print(f"  - {metric} (fqdd={last['fqdd'] if last['fqdd'] is not None else 'N/A'}): p97={last['p97_value']:.3f} {units or ''}, mean_top3={last['upper3_mean']:.3f}")
+
+                except Exception as e:
+                    print(f"  - Error processing {metric}: {e}")
+                    continue
+
+            result_df = pd.DataFrame(rows, columns=['metric','hostname','fqdd','units','p97_value','upper3_mean','max_value','sample_count','samples_in_upper3'])
+            return {'ZEN4_Peak_Power': result_df}
+
+        except Exception as e:
+            print(f"Error getting ZEN4 peak power analysis: {e}")
+            return {}
     
     def create_excel_report(self, power_metrics, power_analysis, time_range_data, recent_data, output_filename=None):
         """Create Excel report with separate sheets for each dataset"""
@@ -445,58 +651,142 @@ def main():
     print("=" * 60)
     print(f"📅 Started at: {datetime.now()}")
     print()
-    
-    # Time window to match H100 analysis
-    start_time = datetime(2025, 9, 1, 0, 0, 0)
-    end_time = datetime(2025, 9, 2, 0, 0, 0)
-    print(f"📊 Analyzing ZEN4 power data from {start_time.strftime('%Y-%m-%d %H:%M:%S')} to {end_time.strftime('%Y-%m-%d %H:%M:%S')} (rpc-91-1)")
-    
+    # CLI flags similar to H100
+    parser = argparse.ArgumentParser(description="Run ZEN4 power analyses")
+    parser.add_argument("--hostname", default="rpc-91-1", help="Target hostname")
+    parser.add_argument("--idle", action="store_true", help="Run idle/static power analysis")
+    parser.add_argument("--peak", action="store_true", help="Run peak power analysis (top 3%)")
+    parser.add_argument("--comprehensive", action="store_true", help="Run comprehensive metric analysis")
+    parser.add_argument("--time-range", dest="time_range", action="store_true", help="Run time range summary analysis")
+    parser.add_argument("--recent", action="store_true", help="Fetch recent power data")
+    parser.add_argument("--excel", action="store_true", help="Create Excel report (uses available datasets)")
+    parser.add_argument("--comp-start", type=lambda s: datetime.strptime(s, "%Y-%m-%d %H:%M:%S"), default=datetime(2025, 9, 1, 0, 0, 0))
+    parser.add_argument("--comp-end", type=lambda s: datetime.strptime(s, "%Y-%m-%d %H:%M:%S"), default=datetime(2025, 9, 2, 0, 0, 0))
+    parser.add_argument("--idle-start", type=lambda s: datetime.strptime(s, "%Y-%m-%d %H:%M:%S"), default=datetime(2025, 9, 1, 0, 0, 0))
+    parser.add_argument("--idle-end", type=lambda s: datetime.strptime(s, "%Y-%m-%d %H:%M:%S"), default=datetime(2025, 9, 15, 0, 0, 0))
+    parser.add_argument("--recent-limit", type=int, default=100)
+    args = parser.parse_args()
+
+    if not any([args.idle, args.peak, args.comprehensive, args.time_range, args.recent, args.excel]):
+        args.idle = True
+
+    print(f"🎯 Hostname: {args.hostname}")
+    print(f"📊 Comprehensive window: {args.comp_start.strftime('%Y-%m-%d %H:%M:%S')} -> {args.comp_end.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"🛌 Idle window: {args.idle_start.strftime('%Y-%m-%d %H:%M:%S')} -> {args.idle_end.strftime('%Y-%m-%d %H:%M:%S')}")
+
     runner = Zen4PowerQueryRunner()
     
     try:
         # Connect to ZEN4 database
         if not runner.connect_to_zen4():
             return
-        
-        # Comprehensive metric analysis (GPU omitted)
-        comp = runner.get_comprehensive_metric_analysis(start_time, end_time)
-        
-        # Minimal time-range and recent sections can be skipped; focus on comprehensive output
-        print("\nCreating ZEN4 comprehensive report...")
-        # Reuse H100-style exporter pattern: write a small Excel with breakdown
-        output_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'output', 'zen4')
-        os.makedirs(output_dir, exist_ok=True)
-        excel_path = os.path.join(output_dir, f"zen4_comprehensive_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
-        with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
-            # Component breakdown
-            if comp.get('Component_Breakdown') is not None and not comp['Component_Breakdown'].empty:
-                comp['Component_Breakdown'].to_excel(writer, sheet_name='Component_Breakdown', index=False)
-            # Raw metric data
-            for cat, items in comp.get('Metric_Data', {}).items():
-                for name, df in items.items():
-                    if not df.empty:
-                        # Ensure timezone-naive timestamps for Excel
-                        if 'timestamp' in df.columns:
-                            try:
-                                df = df.copy()
-                                df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
-                                df['timestamp'] = df['timestamp'].dt.tz_localize(None)
-                            except Exception:
-                                pass
-                        df.to_excel(writer, sheet_name=(f"{cat}_{name}")[:31], index=False)
-            # Energy analysis
-            if comp.get('Energy_Analysis'):
-                rows = []
-                for cat, items in comp['Energy_Analysis'].items():
-                    for name, val in items.items():
-                        rows.append({'category':cat, 'metric':name, 'energy_kwh':val})
-                pd.DataFrame(rows).to_excel(writer, sheet_name='Energy_Summary', index=False)
+        # Accumulators
+        comp = {}
+        time_range_data = {}
+        recent_data = {}
 
-        print(f"  - Excel saved: {excel_path}")
-        if comp.get('Component_Pie_Path'):
-            print(f"  - Pie chart saved: {comp['Component_Pie_Path']}")
-        
-        print("✅ ZEN4 comprehensive analysis completed successfully!")
+        # Idle/static analysis
+        if args.idle:
+            print("\nRunning idle/static power analysis (lower 3% of non-zero readings)...")
+            idle = runner.get_idle_power_analysis(args.idle_start, args.idle_end, hostname=args.hostname)
+            idle_df = idle.get('ZEN4_Idle_Power', pd.DataFrame())
+            if not idle_df.empty:
+                print("Idle Power (3rd percentile and mean of bottom 3%) by metric:")
+                display_df = idle_df.copy()
+                preferred = []
+                for metric in sorted(display_df['metric'].unique()):
+                    sub = display_df[display_df['metric'] == metric]
+                    if (sub['fqdd'] == 'TOTAL').any():
+                        preferred.append(sub[sub['fqdd'] == 'TOTAL'].iloc[0])
+                    else:
+                        preferred.append(sub.nsmallest(1, 'p3_value').iloc[0])
+                summary_df = pd.DataFrame(preferred)[['metric','fqdd','units','p3_value','lower3_mean','min_nonzero','sample_count','samples_in_lower3']]
+                for _, row in summary_df.iterrows():
+                    fqdd_label = row['fqdd'] if pd.notna(row['fqdd']) else 'N/A'
+                    print(f"  - {row['metric']} (fqdd={fqdd_label}): p3={row['p3_value']:.3f} {row['units'] or ''}, mean_low3={row['lower3_mean']:.3f}, min_nonzero={row['min_nonzero']:.3f}")
+            else:
+                print("No idle power data available for the requested interval.")
+
+        # Comprehensive analysis
+        if args.comprehensive:
+            print("\nRunning comprehensive metric analysis...")
+            comp = runner.get_comprehensive_metric_analysis(args.comp_start, args.comp_end)
+
+        # Time range summaries: map comp window to hours for this helper
+        if args.time_range:
+            print("\nRunning time range summaries...")
+            hours = max(1, int((args.comp_end - args.comp_start).total_seconds() // 3600))
+            time_range_data = runner.get_time_range_analysis(hours=hours)
+
+        # Recent data
+        if args.recent:
+            print("\nFetching recent data...")
+            recent_data = runner.get_recent_power_data(limit=args.recent_limit)
+
+        # Excel output if requested (combine available datasets)
+        if args.excel:
+            print("\nCreating ZEN4 report...")
+            output_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'output', 'zen4')
+            os.makedirs(output_dir, exist_ok=True)
+            excel_path = os.path.join(output_dir, f"zen4_selected_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
+            with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+                # Component breakdown and energy from comprehensive
+                if comp.get('Component_Breakdown') is not None and not getattr(comp.get('Component_Breakdown'), 'empty', True):
+                    comp['Component_Breakdown'].to_excel(writer, sheet_name='Component_Breakdown', index=False)
+                if comp.get('Energy_Analysis'):
+                    rows = []
+                    for cat, items in comp['Energy_Analysis'].items():
+                        for name, val in items.items():
+                            rows.append({'category':cat, 'metric':name, 'energy_kwh':val})
+                    if rows:
+                        pd.DataFrame(rows).to_excel(writer, sheet_name='Energy_Summary', index=False)
+                # Raw metric data
+                for cat, items in comp.get('Metric_Data', {}).items():
+                    for name, df in items.items():
+                        if not df.empty:
+                            if 'timestamp' in df.columns:
+                                try:
+                                    df = df.copy()
+                                    df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+                                    df['timestamp'] = df['timestamp'].dt.tz_localize(None)
+                                except Exception:
+                                    pass
+                            df.to_excel(writer, sheet_name=(f"{cat}_{name}")[:31], index=False)
+                # Time range and recent
+                for sheet_name, df in time_range_data.items():
+                    if not df.empty:
+                        df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
+                for sheet_name, df in recent_data.items():
+                    if not df.empty:
+                        df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
+
+            print(f"  - Excel saved: {excel_path}")
+            if comp.get('Component_Pie_Path'):
+                print(f"  - Pie chart saved: {comp['Component_Pie_Path']}")
+
+        # Peak power analysis
+        if args.peak:
+            print("\nRunning peak power analysis (top 3% of non-zero readings)...")
+            peak = runner.get_peak_power_analysis(args.comp_start, args.comp_end, hostname=args.hostname)
+            peak_df = peak.get('ZEN4_Peak_Power', pd.DataFrame())
+            if not peak_df.empty:
+                print("Peak Power (97th percentile and mean of top 3%) by metric:")
+                display_df = peak_df.copy()
+                preferred = []
+                for metric in sorted(display_df['metric'].unique()):
+                    sub = display_df[display_df['metric'] == metric]
+                    if (sub['fqdd'] == 'TOTAL').any():
+                        preferred.append(sub[sub['fqdd'] == 'TOTAL'].iloc[0])
+                    else:
+                        preferred.append(sub.nlargest(1, 'p97_value').iloc[0])
+                summary_df = pd.DataFrame(preferred)[['metric','fqdd','units','p97_value','upper3_mean','max_value','sample_count','samples_in_upper3']]
+                for _, row in summary_df.iterrows():
+                    fqdd_label = row['fqdd'] if pd.notna(row['fqdd']) else 'N/A'
+                    print(f"  - {row['metric']} (fqdd={fqdd_label}): p97={row['p97_value']:.3f} {row['units'] or ''}, mean_top3={row['upper3_mean']:.3f}, max={row['max_value']:.3f}")
+            else:
+                print("No peak power data available for the requested interval.")
+
+        print("\n✅ Selected ZEN4 analyses completed successfully!")
         
     except KeyboardInterrupt:
         print("\n⚠️  Interrupted by user")

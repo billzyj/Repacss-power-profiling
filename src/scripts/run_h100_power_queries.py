@@ -11,16 +11,18 @@ from datetime import datetime, timedelta
 from typing import Dict, List
 import re
 import matplotlib.pyplot as plt
+import argparse
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from queries.compute.idrac import get_compute_metrics_with_joins
-from core.database import (
+from database.database import (
     connect_to_database,
     disconnect_all
 )
-from core.power_utils import create_power_query_with_conversion, compute_energy_kwh_for_hostname
+from utils.query_helpers import create_power_query_with_conversion
+from analysis.energy import compute_energy_kwh_for_hostname
 
 # Define metric constants directly to avoid import issues
 CPU_METRICS = ['CPUPower', 'PkgPwr', 'TotalCPUPower']
@@ -622,6 +624,131 @@ class H100PowerQueryRunner:
             print(f"Error getting comprehensive metric analysis: {e}")
             return {}
     
+    def get_idle_power_analysis(self, start_time: datetime, end_time: datetime, hostname: str = 'rpg-93-1', metrics: List[str] = None):
+        """Analyze idle/static power as the lower 3% of non-zero readings per metric.
+
+        - Scans between start_time and end_time for the specified hostname
+        - For each metric, computes:
+          - 3rd percentile value of non-zero readings (p3_value)
+          - Mean of readings within the bottom 3% tail (lower3_mean)
+          - Minimum non-zero reading (min_nonzero)
+          - Per-FQDD results when available, plus a TOTAL series by summing FQDDs per timestamp
+        - No energy calculations are performed here
+        """
+        try:
+            print(f"📊 Collecting H100 idle power between {start_time.strftime('%Y-%m-%d %H:%M:%S')} and {end_time.strftime('%Y-%m-%d %H:%M:%S')} for {hostname}...")
+
+            # Default metric set covers major components; can be overridden via 'metrics'
+            if metrics is None:
+                base_metrics = set(CPU_METRICS + MEMORY_METRICS + GPU_METRICS + FAN_METRICS + STORAGE_METRICS + SYSTEM_METRICS)
+                # Include an alternative GPU metric id often used elsewhere in this file
+                base_metrics.update(['gpu1power'])
+                metrics = sorted(base_metrics)
+
+            rows = []
+
+            for metric in metrics:
+                try:
+                    query = get_compute_metrics_with_joins(
+                        metric_id=metric,
+                        hostname=hostname,
+                        start_time=start_time.strftime('%Y-%m-%d %H:%M:%S'),
+                        end_time=end_time.strftime('%Y-%m-%d %H:%M:%S')
+                    )
+                    df_metric = pd.read_sql_query(query, self.client.db_connection)
+
+                    if df_metric.empty or 'value' not in df_metric.columns:
+                        print(f"  - {metric}: No data")
+                        continue
+
+                    # Normalize timestamp for stability in downstream groupings
+                    if 'timestamp' in df_metric.columns:
+                        df_metric['timestamp'] = df_metric['timestamp'].dt.tz_localize(None)
+
+                    # Helper to compute idle stats given a series of values
+                    def compute_idle_from_series(values: pd.Series) -> Dict[str, float]:
+                        nonzero = values[values > 0]
+                        if nonzero.empty:
+                            return {
+                                'p3_value': 0.0,
+                                'lower3_mean': 0.0,
+                                'min_nonzero': 0.0,
+                                'sample_count': int(values.shape[0]),
+                                'samples_in_lower3': 0
+                            }
+                        p3 = float(nonzero.quantile(0.03))
+                        lower_tail = nonzero[nonzero <= p3]
+                        return {
+                            'p3_value': p3,
+                            'lower3_mean': float(lower_tail.mean()) if not lower_tail.empty else 0.0,
+                            'min_nonzero': float(nonzero.min()),
+                            'sample_count': int(values.shape[0]),
+                            'samples_in_lower3': int(lower_tail.shape[0])
+                        }
+
+                    units = None
+                    if 'units' in df_metric.columns and df_metric['units'].notna().any():
+                        units = df_metric['units'].dropna().iloc[0]
+
+                    # If FQDD is available, compute per-FQDD idle plus a TOTAL by time-summing
+                    has_fqdd = ('fqdd' in df_metric.columns and df_metric['fqdd'].notna().any())
+                    if has_fqdd:
+                        # Per-FQDD
+                        for fq in df_metric['fqdd'].dropna().unique():
+                            fq_df = df_metric[df_metric['fqdd'] == fq]
+                            stats = compute_idle_from_series(fq_df['value'])
+                            rows.append({
+                                'metric': metric,
+                                'hostname': hostname,
+                                'fqdd': str(fq),
+                                'units': units,
+                                **stats
+                            })
+
+                        # TOTAL series by summing across FQDDs per timestamp
+                        df_total = df_metric.groupby('timestamp', as_index=False)['value'].sum()
+                        stats_total = compute_idle_from_series(df_total['value'])
+                        rows.append({
+                            'metric': metric,
+                            'hostname': hostname,
+                            'fqdd': 'TOTAL',
+                            'units': units,
+                            **stats_total
+                        })
+                    else:
+                        # Single series (no FQDD)
+                        stats = compute_idle_from_series(df_metric['value'])
+                        rows.append({
+                            'metric': metric,
+                            'hostname': hostname,
+                            'fqdd': None,
+                            'units': units,
+                            **stats
+                        })
+
+                    # Log concise status
+                    last_row = rows[-1]
+                    fqdd_label = last_row['fqdd'] if last_row['fqdd'] is not None else 'N/A'
+                    print(f"  - {metric} (fqdd={fqdd_label}): p3={last_row['p3_value']:.3f} {units or ''}, mean_low3={last_row['lower3_mean']:.3f}")
+
+                except Exception as e:
+                    print(f"  - Error processing {metric}: {e}")
+                    continue
+
+            result_df = pd.DataFrame(rows, columns=[
+                'metric', 'hostname', 'fqdd', 'units',
+                'p3_value', 'lower3_mean', 'min_nonzero',
+                'sample_count', 'samples_in_lower3'
+            ])
+
+            return {
+                'H100_Idle_Power': result_df
+            }
+
+        except Exception as e:
+            print(f"Error getting H100 idle power analysis: {e}")
+            return {}
+
     def get_recent_power_data(self, limit: int = 100):
         """Get recent H100 power data"""
         try:
@@ -669,6 +796,122 @@ class H100PowerQueryRunner:
             
         except Exception as e:
             print(f"Error getting recent H100 power data: {e}")
+            return {}
+
+    def get_peak_power_analysis(self, start_time: datetime, end_time: datetime, hostname: str = 'rpg-93-1', metrics: List[str] = None):
+        """Analyze peak power as the top 3% of non-zero readings per metric.
+
+        - Scans between start_time and end_time for the specified hostname
+        - For each metric, computes:
+          - 97th percentile value of non-zero readings (p97_value)
+          - Mean of readings within the top 3% tail (upper3_mean)
+          - Maximum non-zero reading (max_value)
+          - Per-FQDD results when available, plus a TOTAL series by summing FQDDs per timestamp
+        - No energy calculations are performed here
+        """
+        try:
+            print(f"📊 Collecting H100 peak power between {start_time.strftime('%Y-%m-%d %H:%M:%S')} and {end_time.strftime('%Y-%m-%d %H:%M:%S')} for {hostname}...")
+
+            if metrics is None:
+                base_metrics = set(CPU_METRICS + MEMORY_METRICS + GPU_METRICS + FAN_METRICS + STORAGE_METRICS + SYSTEM_METRICS)
+                base_metrics.update(['gpu1power'])
+                metrics = sorted(base_metrics)
+
+            rows = []
+
+            for metric in metrics:
+                try:
+                    query = get_compute_metrics_with_joins(
+                        metric_id=metric,
+                        hostname=hostname,
+                        start_time=start_time.strftime('%Y-%m-%d %H:%M:%S'),
+                        end_time=end_time.strftime('%Y-%m-%d %H:%M:%S')
+                    )
+                    df_metric = pd.read_sql_query(query, self.client.db_connection)
+
+                    if df_metric.empty or 'value' not in df_metric.columns:
+                        print(f"  - {metric}: No data")
+                        continue
+
+                    if 'timestamp' in df_metric.columns:
+                        df_metric['timestamp'] = df_metric['timestamp'].dt.tz_localize(None)
+
+                    def compute_peak_from_series(values: pd.Series) -> Dict[str, float]:
+                        nonzero = values[values > 0]
+                        if nonzero.empty:
+                            return {
+                                'p97_value': 0.0,
+                                'upper3_mean': 0.0,
+                                'max_value': 0.0,
+                                'sample_count': int(values.shape[0]),
+                                'samples_in_upper3': 0
+                            }
+                        p97 = float(nonzero.quantile(0.97))
+                        upper_tail = nonzero[nonzero >= p97]
+                        return {
+                            'p97_value': p97,
+                            'upper3_mean': float(upper_tail.mean()) if not upper_tail.empty else 0.0,
+                            'max_value': float(nonzero.max()),
+                            'sample_count': int(values.shape[0]),
+                            'samples_in_upper3': int(upper_tail.shape[0])
+                        }
+
+                    units = None
+                    if 'units' in df_metric.columns and df_metric['units'].notna().any():
+                        units = df_metric['units'].dropna().iloc[0]
+
+                    has_fqdd = ('fqdd' in df_metric.columns and df_metric['fqdd'].notna().any())
+                    if has_fqdd:
+                        for fq in df_metric['fqdd'].dropna().unique():
+                            fq_df = df_metric[df_metric['fqdd'] == fq]
+                            stats = compute_peak_from_series(fq_df['value'])
+                            rows.append({
+                                'metric': metric,
+                                'hostname': hostname,
+                                'fqdd': str(fq),
+                                'units': units,
+                                **stats
+                            })
+
+                        df_total = df_metric.groupby('timestamp', as_index=False)['value'].sum()
+                        stats_total = compute_peak_from_series(df_total['value'])
+                        rows.append({
+                            'metric': metric,
+                            'hostname': hostname,
+                            'fqdd': 'TOTAL',
+                            'units': units,
+                            **stats_total
+                        })
+                    else:
+                        stats = compute_peak_from_series(df_metric['value'])
+                        rows.append({
+                            'metric': metric,
+                            'hostname': hostname,
+                            'fqdd': None,
+                            'units': units,
+                            **stats
+                        })
+
+                    last_row = rows[-1]
+                    fqdd_label = last_row['fqdd'] if last_row['fqdd'] is not None else 'N/A'
+                    print(f"  - {metric} (fqdd={fqdd_label}): p97={last_row['p97_value']:.3f} {units or ''}, mean_top3={last_row['upper3_mean']:.3f}")
+
+                except Exception as e:
+                    print(f"  - Error processing {metric}: {e}")
+                    continue
+
+            result_df = pd.DataFrame(rows, columns=[
+                'metric', 'hostname', 'fqdd', 'units',
+                'p97_value', 'upper3_mean', 'max_value',
+                'sample_count', 'samples_in_upper3'
+            ])
+
+            return {
+                'H100_Peak_Power': result_df
+            }
+
+        except Exception as e:
+            print(f"Error getting H100 peak power analysis: {e}")
             return {}
     
     def create_excel_report(self, power_metrics, power_analysis, time_range_data, recent_data, output_filename=None):
@@ -818,13 +1061,30 @@ def main():
     print("=" * 60)
     print(f"📅 Started at: {datetime.now()}")
     print()
-    
-    # Set specific time period
-    start_time = datetime(2025, 9, 1, 0, 0, 0)
-    end_time = datetime(2025, 9, 2, 0, 0, 0)
-    
-    print(f"📊 Analyzing H100 power data from {start_time.strftime('%Y-%m-%d %H:%M:%S')} to {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"🎯 Focus: rpg-93-1 (H100 node) with comprehensive metric analysis")
+    # CLI flags to control which analyses to run
+    parser = argparse.ArgumentParser(description="Run H100 power analyses")
+    parser.add_argument("--hostname", default="rpg-93-1", help="Target hostname")
+    parser.add_argument("--idle", action="store_true", help="Run idle/static power analysis")
+    parser.add_argument("--peak", action="store_true", help="Run peak power analysis (top 3%)")
+    parser.add_argument("--comprehensive", action="store_true", help="Run comprehensive metric analysis")
+    parser.add_argument("--time-range", dest="time_range", action="store_true", help="Run time range summary analysis")
+    parser.add_argument("--recent", action="store_true", help="Fetch recent power data")
+    parser.add_argument("--excel", action="store_true", help="Create comprehensive Excel report (uses available datasets)")
+    # Time windows
+    parser.add_argument("--comp-start", type=lambda s: datetime.strptime(s, "%Y-%m-%d %H:%M:%S"), default=datetime(2025, 9, 1, 0, 0, 0))
+    parser.add_argument("--comp-end", type=lambda s: datetime.strptime(s, "%Y-%m-%d %H:%M:%S"), default=datetime(2025, 9, 2, 0, 0, 0))
+    parser.add_argument("--idle-start", type=lambda s: datetime.strptime(s, "%Y-%m-%d %H:%M:%S"), default=datetime(2025, 9, 1, 0, 0, 0))
+    parser.add_argument("--idle-end", type=lambda s: datetime.strptime(s, "%Y-%m-%d %H:%M:%S"), default=datetime(2025, 9, 15, 0, 0, 0))
+    parser.add_argument("--recent-limit", type=int, default=100)
+    args = parser.parse_args()
+
+    # Default to idle-only if no flags passed
+    if not any([args.idle, args.peak, args.comprehensive, args.time_range, args.recent, args.excel]):
+        args.idle = True
+
+    print(f"🎯 Hostname: {args.hostname}")
+    print(f"📊 Comprehensive window: {args.comp_start.strftime('%Y-%m-%d %H:%M:%S')} -> {args.comp_end.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"🛌 Idle window: {args.idle_start.strftime('%Y-%m-%d %H:%M:%S')} -> {args.idle_end.strftime('%Y-%m-%d %H:%M:%S')}")
     print()
     
     runner = H100PowerQueryRunner()
@@ -834,53 +1094,82 @@ def main():
         if not runner.connect_to_h100():
             return
         
-        # Get comprehensive metric analysis
-        comprehensive_analysis = runner.get_comprehensive_metric_analysis(start_time, end_time)
-        
-        # Get time range analysis
-        time_range_data = runner.get_time_range_analysis(start_time, end_time)
-        
-        # Get recent power data
-        recent_data = runner.get_recent_power_data(limit=100)
-        
-        # Create Excel report
-        print("\nCreating Excel report...")
-        output_file = runner.create_comprehensive_excel_report(
-            comprehensive_analysis, time_range_data, recent_data
-        )
-        
-        if output_file:
-            print(f"\nH100 comprehensive analysis report summary:")
-            print(f"  - Comprehensive analysis sheets: {len(comprehensive_analysis.get('Metric_Data', {}))}")
-            print(f"  - Time range sheets: {len([k for k, v in time_range_data.items() if not v.empty])}")
-            print(f"  - Recent data sheets: {len([k for k, v in recent_data.items() if not v.empty])}")
-            print(f"  - Output file: {output_file}")
-            
-            # Print energy analysis summary
-            if 'Energy_Analysis' in comprehensive_analysis:
-                print(f"\nEnergy Analysis Summary:")
-                for category, metrics in comprehensive_analysis['Energy_Analysis'].items():
-                    print(f"  {category}:")
-                    for metric, energy in metrics.items():
-                        print(f"    - {metric}: {energy:.3f} kWh")
-            
-            # Print relationship analysis summary
-            if 'Relationship_Analysis' in comprehensive_analysis and not comprehensive_analysis['Relationship_Analysis'].empty:
-                print(f"\nMetric Relationship Analysis:")
-                for _, row in comprehensive_analysis['Relationship_Analysis'].iterrows():
-                    print(f"  - {row['category']}: {row['metric1']} vs {row['metric2']} - {row['relationship']} ({row['difference_percent']:.1f}% diff)")
-            
-            # Print component breakdown
-            if 'Component_Breakdown' in comprehensive_analysis and not comprehensive_analysis['Component_Breakdown'].empty:
-                print(f"\nComponent Energy Breakdown:")
-                for _, row in comprehensive_analysis['Component_Breakdown'].iterrows():
-                    print(f"  - {row['component']}: {row['energy_kwh']:.3f} kWh")
-            if comprehensive_analysis.get('Component_Pie_Path'):
-                print(f"  - Pie chart saved to: {comprehensive_analysis['Component_Pie_Path']}")
-        else:
-            print("Failed to create Excel report")
-        
-        print("✅ All H100 power queries completed successfully!")
+        # Accumulators for optional Excel output
+        comprehensive_analysis = {}
+        time_range_data = {}
+        recent_data = {}
+
+        # Idle/static power analysis (lower 3% of non-zero readings)
+        if args.idle:
+            print("\nRunning idle/static power analysis (lower 3% of non-zero readings)...")
+            idle_results = runner.get_idle_power_analysis(args.idle_start, args.idle_end, hostname=args.hostname)
+            idle_df = idle_results.get('H100_Idle_Power', pd.DataFrame())
+            if not idle_df.empty:
+                print("Idle Power (3rd percentile and mean of bottom 3%) by metric:")
+                display_df = idle_df.copy()
+                preferred = []
+                for metric in sorted(display_df['metric'].unique()):
+                    sub = display_df[display_df['metric'] == metric]
+                    if (sub['fqdd'] == 'TOTAL').any():
+                        preferred.append(sub[sub['fqdd'] == 'TOTAL'].iloc[0])
+                    else:
+                        preferred.append(sub.nsmallest(1, 'p3_value').iloc[0])
+                summary_df = pd.DataFrame(preferred)[['metric','fqdd','units','p3_value','lower3_mean','min_nonzero','sample_count','samples_in_lower3']]
+                for _, row in summary_df.iterrows():
+                    fqdd_label = row['fqdd'] if pd.notna(row['fqdd']) else 'N/A'
+                    print(f"  - {row['metric']} (fqdd={fqdd_label}): p3={row['p3_value']:.3f} {row['units'] or ''}, mean_low3={row['lower3_mean']:.3f}, min_nonzero={row['min_nonzero']:.3f}")
+            else:
+                print("No idle power data available for the requested interval.")
+
+        # Comprehensive analysis
+        if args.comprehensive:
+            print("\nRunning comprehensive metric analysis...")
+            comprehensive_analysis = runner.get_comprehensive_metric_analysis(args.comp_start, args.comp_end)
+
+        # Time range summaries
+        if args.time_range:
+            print("\nRunning time range summaries...")
+            time_range_data = runner.get_time_range_analysis(args.comp_start, args.comp_end)
+
+        # Recent data
+        if args.recent:
+            print("\nFetching recent data...")
+            recent_data = runner.get_recent_power_data(limit=args.recent_limit)
+
+        # Optional Excel
+        if args.excel:
+            print("\nCreating Excel report...")
+            output_file = runner.create_comprehensive_excel_report(
+                comprehensive_analysis, time_range_data, recent_data
+            )
+            if output_file:
+                print(f"Excel written: {output_file}")
+            else:
+                print("Failed to create Excel report")
+
+        # Peak power analysis (top 3% of non-zero readings)
+        if args.peak:
+            print("\nRunning peak power analysis (top 3% of non-zero readings)...")
+            peak_results = runner.get_peak_power_analysis(args.comp_start, args.comp_end, hostname=args.hostname)
+            peak_df = peak_results.get('H100_Peak_Power', pd.DataFrame())
+            if not peak_df.empty:
+                print("Peak Power (97th percentile and mean of top 3%) by metric:")
+                display_df = peak_df.copy()
+                preferred = []
+                for metric in sorted(display_df['metric'].unique()):
+                    sub = display_df[display_df['metric'] == metric]
+                    if (sub['fqdd'] == 'TOTAL').any():
+                        preferred.append(sub[sub['fqdd'] == 'TOTAL'].iloc[0])
+                    else:
+                        preferred.append(sub.nlargest(1, 'p97_value').iloc[0])
+                summary_df = pd.DataFrame(preferred)[['metric','fqdd','units','p97_value','upper3_mean','max_value','sample_count','samples_in_upper3']]
+                for _, row in summary_df.iterrows():
+                    fqdd_label = row['fqdd'] if pd.notna(row['fqdd']) else 'N/A'
+                    print(f"  - {row['metric']} (fqdd={fqdd_label}): p97={row['p97_value']:.3f} {row['units'] or ''}, mean_top3={row['upper3_mean']:.3f}, max={row['max_value']:.3f}")
+            else:
+                print("No peak power data available for the requested interval.")
+
+        print("\n✅ Selected H100 analyses completed successfully!")
         
     except KeyboardInterrupt:
         print("\n⚠️  Interrupted by user")

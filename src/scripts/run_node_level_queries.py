@@ -23,8 +23,8 @@ project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 from queries.compute.idrac import get_power_metrics_with_joins
 from queries.compute.public import POWER_METRICS_QUERY_UNIT_IN_MW_W_KW
-from core.power_utils import get_power_conversion_sql, should_exclude_metric
-from core.database import (
+from utils.query_helpers import get_power_conversion_sql, should_exclude_metric
+from database.database import (
     connect_to_database, 
     connect_to_specific_databases,
     disconnect_all,

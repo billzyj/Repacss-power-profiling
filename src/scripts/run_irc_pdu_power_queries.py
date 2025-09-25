@@ -8,7 +8,8 @@ from datetime import datetime, timedelta
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.power_utils import multi_node_power_analysis, IRC_NODES, PDU_NODES
+from analysis.power import PowerAnalyzer
+from constants.nodes import IRC_NODES, PDU_NODES
 
 # Specifically, we want to run the irc and pdu queries for the last 24 hours, 
 # calculate the energy consumption for each metric for all irc nodes and pdu nodes,

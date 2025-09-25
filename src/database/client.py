@@ -55,19 +55,43 @@ class REPACSSPowerClient:
         """Connect to the database through SSH tunnel"""
         try:
             logger.info(f"Establishing SSH tunnel to {self.ssh_config.hostname}:{self.ssh_config.port}")
-            self.tunnel = SSHTunnelForwarder(
-                (self.ssh_config.hostname, self.ssh_config.port),
-                ssh_username=self.ssh_config.username,
-                ssh_pkey=self.ssh_config.private_key_path,
-                ssh_private_key_password=self.ssh_config.passphrase or None,
-                remote_bind_address=(self.db_config.host, self.db_config.port),
-                local_bind_address=('localhost',),
-            )
-            self.tunnel.start()
-            logger.info(f"SSH tunnel established: localhost:{self.tunnel.local_bind_port} -> {self.db_config.host}:{self.db_config.port}")
+            # Let SSHTunnelForwarder handle key loading automatically
+            # Don't pre-load the key, let SSHTunnelForwarder handle it
+            ssh_key = self.ssh_config.private_key_path
+            
+            # Use subprocess to create SSH tunnel (bypasses DSS issues)
+            import subprocess
+            import socket
+            import time
+            
+            # Find an available local port
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(('', 0))
+                local_port = s.getsockname()[1]
+            
+            # Create SSH tunnel using subprocess
+            ssh_cmd = [
+                'ssh', '-N', '-L', f'{local_port}:{self.db_config.host}:{self.db_config.port}',
+                '-i', self.ssh_config.private_key_path,
+                '-p', str(self.ssh_config.port),
+                f'{self.ssh_config.username}@{self.ssh_config.hostname}'
+            ]
+            
+            # Start the SSH tunnel process
+            self.tunnel = subprocess.Popen(ssh_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            
+            # Wait a moment for the tunnel to establish
+            time.sleep(2)
+            
+            # Check if the process is still running
+            if self.tunnel.poll() is not None:
+                stdout, stderr = self.tunnel.communicate()
+                raise Exception(f"SSH tunnel failed: {stderr.decode()}")
+            
+            logger.info(f"SSH tunnel established: localhost:{local_port} -> {self.db_config.host}:{self.db_config.port}")
             self.db_connection = psycopg2.connect(
                 host='localhost',
-                port=self.tunnel.local_bind_port,
+                port=local_port,
                 database=self.db_config.database,
                 user=self.db_config.username,
                 password=self.db_config.password,
@@ -79,7 +103,14 @@ class REPACSSPowerClient:
                 logger.info(f"Connected to database: {version[0]}")
                 
         except Exception as e:
-            logger.error(f"Failed to connect: {e}")
+            error_msg = str(e)
+            if "DSSKey" in error_msg:
+                logger.error(f"SSH key format issue: {error_msg}")
+                logger.error("DSS keys are deprecated. Please convert your SSH key to RSA or Ed25519 format:")
+                logger.error("  ssh-keygen -p -m RFC4716 -f /path/to/your/key")
+                logger.error("  or generate a new key: ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519")
+            else:
+                logger.error(f"Failed to connect: {e}")
             self.disconnect()
             raise
     
@@ -91,7 +122,15 @@ class REPACSSPowerClient:
             logger.info("Database connection closed")
         
         if self.tunnel:
-            self.tunnel.stop()
+            if hasattr(self.tunnel, 'stop'):
+                self.tunnel.stop()
+            elif hasattr(self.tunnel, 'terminate'):
+                # Subprocess
+                self.tunnel.terminate()
+                self.tunnel.wait()
+            else:
+                # SSH client
+                self.tunnel.close()
             self.tunnel = None
             logger.info("SSH tunnel closed")
     

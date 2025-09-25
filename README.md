@@ -22,59 +22,116 @@ This project provides a Python client to connect to the REPACSS TimescaleDB and 
 - **Power consumption validation** comparing compute nodes vs PDU measurements
 - **Smart power estimation** for unmeasured components (switches, AMD nodes, etc.)
 
-## Quick Start
+## Quick Start (New CLI)
 
-### 1. Installation
+### 1. Install
 
 ```bash
 git clone <repository-url>
 cd repacss-power-measurement
 python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+```
+
+### 2. Configure
+
+**Setup Flow:**
+1. **Template → .env**: `setup.py` copies `env.template` to create your personal `.env` file
+2. **Edit credentials**: You fill in your actual database and SSH information
+3. **Secure storage**: `.env` file is automatically protected from git commits
+
+```bash
+# Step 1: Create your .env file from template
 python setup.py
+
+# Step 2: Edit the generated file with your credentials
+# File location: src/database/config/.env
+# Edit with your actual database host, username, password, SSH details, etc.
 ```
 
-### 2. Configuration
+**What to Edit in `.env`:**
+```bash
+# Database Settings (replace with your actual values)
+REPACSS_DB_HOST=your.database.host.com
+REPACSS_DB_USER=your_database_username
+REPACSS_DB_PASSWORD=your_database_password
 
-The setup script automatically creates the configuration file and adds it to `.gitignore`. You just need to edit the generated file with your credentials:
+# SSH Settings (replace with your actual values)
+REPACSS_SSH_HOSTNAME=your.ssh.host.com
+REPACSS_SSH_USERNAME=your_ssh_username
+REPACSS_SSH_KEY_PATH=/path/to/your/private/key
+```
+
+**SSH Key Requirements:**
+- **Supported formats**: RSA, Ed25519, ECDSA
+- **DSS keys are deprecated** and not supported in newer paramiko versions
+- **Convert DSS keys**: `ssh-keygen -p -m RFC4716 -f /path/to/your/key`
+- **Generate new key**: `ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519`
+
+### 3. Test
 
 ```bash
-# Edit src/core/config.py with your database and SSH credentials
+# Test configuration
+python -m src.cli config
+
+# Test database connection
+python -m src.cli connection --database h100
+
+# Test all databases
+python -m src.cli databases
+
+# Or test with example script
+python examples/test_db_connection.py
 ```
 
-### 3. Test Connection
+### 4. Use
 
 ```bash
-python src/examples/test_connection.py
+# Power analysis (system or single node)
+python -m src.cli analyze --database h100
+python -m src.cli analyze --database h100 --hostname rpg-93-1 --hours 6
+
+# Energy calculation (single node)
+python -m src.cli energy --database h100 --hostname rpg-93-1 --hours 24
+
+# Rack analysis (infra)
+python -m src.cli rack --rack 97 --hours 24
+
+# Excel report
+python -m src.cli excel --databases h100 zen4 infra
+
+# Rack report
+python -m src.cli rack-report --rack 97
+
+# Custom report
+python -m src.cli custom --format csv --output report.csv
 ```
 
-### 4. Generate Power Metrics Report
+## Available Interfaces
+
+- **CLI (recommended)**: `python -m src.cli ...`
+- **Legacy scripts**: `src/scripts/run_compute_power_queries.py` (H100/ZEN4)
+- **Programmatic APIs**: import from `services/`, `analysis/`, `queries/`
+
+### CLI Commands
 
 ```bash
-python src/scripts/run_public_queries.py
+# Analysis commands
+python -m src.cli analyze --database h100 --hostname rpg-93-1
+python -m src.cli energy --database h100 --hostname rpg-93-1 --hours 24
+python -m src.cli rack --rack 97 --hours 24
+
+# Reporting commands  
+python -m src.cli excel --databases h100 zen4 infra
+python -m src.cli rack-report --rack 97
+python -m src.cli custom --format csv --output report.csv
+
+# Testing commands
+python -m src.cli config
+python -m src.cli connection --database h100
+python -m src.cli databases
 ```
-
-This will create an Excel file with comprehensive power metrics from all databases.
-
-### 5. Run Comprehensive Rack Analysis
-
-```bash
-python src/scripts/run_rack_related_queries.py
-```
-
-This will analyze all racks (91-97) with power validation and save results to `output/rack/` directory.
-
-## Available Scripts
-
-### Power Analysis Scripts
-
-- **`run_rack_related_queries.py`**: Comprehensive rack power analysis for all racks (91-97)
-- **`run_public_queries.py`**: General power metrics from all databases
-- **`run_node_level_queries.py`**: Individual node power analysis
-- **`run_irc_pdu_power_queries.py`**: Infrastructure power analysis (PDU, IRC)
-- **`run_h100_power_queries.py`**: H100 GPU power analysis
-- **`run_zen4_power_queries.py`**: Zen4 CPU power analysis
 
 ### Analysis Types
 
@@ -84,47 +141,21 @@ This will analyze all racks (91-97) with power validation and save results to `o
 - **GPU Analysis**: H100 GPU power consumption
 - **CPU Analysis**: Zen4 CPU power consumption
 
-## Basic Usage
+## Basic Usage (Programmatic)
 
 ```python
-from core.client import REPACSSPowerClient, DatabaseConfig, SSHConfig
-from core.config import config
+from services.power_service import PowerAnalysisService
+from datetime import datetime, timedelta
 
-# Create client
-client = REPACSSPowerClient(
-    DatabaseConfig(**config.get_database_config("h100")),
-    SSHConfig(**config.get_ssh_config())
-)
-
-try:
-    client.connect()
-    
-    # Get recent power metrics
-    metrics = client.get_computepower_metrics(limit=10)
-    for metric in metrics:
-        print(f"Node {metric['nodeid']}: {metric['value']:.1f}W")
-        
-finally:
-    client.disconnect()
+service = PowerAnalysisService('h100')
+end = datetime.now(); start = end - timedelta(hours=6)
+node_results = service.analyze_node_power('rpg-93-1', start, end)
+print(node_results.get('summary', {}))
 ```
 
 ## Power Analysis with Energy Calculation
 
-The power analysis functions provide comprehensive energy consumption tracking with boundary-aware calculations:
-
-```python
-from core.power_utils import power_analysis, multi_node_power_analysis
-
-# Single node analysis
-df, energy_dict = power_analysis("rpg-01", "2025-01-01 23:00:00", "2025-01-01 23:30:00")
-
-# Multi-node analysis
-results = multi_node_power_analysis(
-    ["rpg-01", "pdu-91-1", "irc-91-5"], 
-    "2025-01-01 23:00:00", 
-    "2025-01-01 23:30:00"
-)
-```
+Energy and boundary handling are implemented in `analysis/energy.py` and used via the service layer.
 
 ### Cumulative Energy Logic
 
@@ -222,11 +253,144 @@ output/rack/
 
 ## Dependencies
 
-- `psycopg2-binary>=2.9.0` - PostgreSQL adapter
-- `pandas>=1.5.0` - Data manipulation and Excel export
-- `openpyxl>=3.0.0` - Excel file generation
-- `paramiko==3.3.1` - SSH protocol implementation
-- `sshtunnel>=0.4.0` - SSH tunnel management
+See `requirements_new.txt` (includes `click` and optional `.env` support).
+
+Key:
+- `psycopg2-binary`, `sshtunnel`, `paramiko`
+- `pandas`, `openpyxl`
+- `click`
+
+## Architecture Overview
+
+### Recent Improvements
+
+**Enhanced Structure (Latest):**
+- **Renamed `core/` → `database/`**: Clearer purpose for database-related modules
+- **Added `constants/` module**: Centralized node lists and metric definitions
+- **Enhanced `utils/` module**: Added query helpers and node detection utilities
+- **Split `power_utils.py`**: Moved functions to focused modules (analysis, utils, constants)
+- **Moved `examples/` and `tests/`**: Now parallel to `src/` for better organization
+- **Improved imports**: Updated all modules to use new structure
+
+### Project Structure
+```
+REPACSS-power-profiling/
+├── src/                        # Application code
+│   ├── cli/                    # CLI interface
+│   ├── database/               # Database connections (renamed from core/)
+│   │   └── config/             # Configuration (template + loader)
+│   ├── analysis/               # Power analysis modules
+│   ├── queries/                # Database queries
+│   ├── services/               # Business logic
+│   ├── reporting/              # Report generation
+│   ├── constants/              # Node lists, metrics (new)
+│   └── utils/                  # Utilities (enhanced)
+├── examples/                    # Usage examples (moved from src/)
+├── tests/                      # Test suite (moved from src/)
+├── docs/                       # Documentation
+├── output/                     # Generated reports
+└── README.md
+```
+
+### Layer Structure
+```
+CLI (src/cli)
+  └─ thin commands delegating to services
+Services (src/services)
+  └─ orchestration/business logic (e.g., PowerAnalysisService)
+Analysis (src/analysis)
+  ├─ power.py (processing)
+  └─ energy.py (energy calc)
+Queries (src/queries)
+  └─ manager.py + schema-specific builders
+Database (src/database)          # ← Renamed from core/
+  ├─ client.py, database.py
+  ├─ connection_pool.py
+  └─ config_new.py (.env support)
+Constants (src/constants)         # ← New module
+  ├─ nodes.py (node definitions)
+  └─ metrics.py (metric definitions)
+Utils (src/utils)                # ← Enhanced
+  ├─ conversions.py
+  ├─ data_processing.py
+  ├─ query_helpers.py
+  └─ node_detection.py
+Reporting (src/reporting)
+  └─ excel.py, formats.py
+```
+
+### Data Flow
+```
+┌─────────────────────────────────────┐
+│        Presentation Layer           │
+├─────────────────┬───────────────────┤
+│   CLI (Input)   │  Reporting (Output)│
+│                 │                   │
+│ • Parse args    │ • Format results  │
+│ • Validate     │ • Display summary │
+│ • Translate    │ • Export files    │
+│ • Delegate     │ • User-friendly   │
+└─────────────────┴───────────────────┘
+         ↓
+┌─────────────────┐
+│  Service Layer  │ ← Business logic, orchestration  
+├─────────────────┤
+│ Analysis Layer  │ ← Power/energy calculations
+├─────────────────┤
+│  Query Layer    │ ← Database queries, validation
+├─────────────────┤
+│  Core Layer     │ ← Connections, configuration
+└─────────────────┘
+         ↓
+    Database
+         ↓
+    Raw Results
+         ↓
+    Back to Reporting Layer
+```
+
+### Module Responsibilities
+
+**Presentation Layer:**
+- **CLI (`src/cli/`)**: Input side - accepts user commands, validates parameters, translates to service calls
+- **Reporting (`src/reporting/`)**: Output side - formats results, displays summaries, exports files
+
+**Business Logic Layer:**
+- **Services (`src/services/`)**: Orchestration - coordinates analysis operations, business rules
+
+**Data Processing Layer:**
+- **Analysis (`src/analysis/`)**: Calculations - power analysis, energy computation, data processing
+- **Queries (`src/queries/`)**: Data access - SQL generation, query validation, database interaction
+
+**Infrastructure Layer:**
+- **Database (`src/database/`)**: Foundation - database connections, configuration, connection pooling
+- **Constants (`src/constants/`)**: Definitions - node lists, metric definitions, system constants
+- **Utils (`src/utils/`)**: Utilities - conversions, data processing, query helpers, node detection
+
+### Request Flow Example
+```
+User: python -m src.cli analyze --database h100 --hostname rpg-93-1
+  ↓
+CLI: Parse arguments, validate input
+  ↓
+Service: PowerAnalysisService.analyze_node_power()
+  ↓
+Analysis: PowerAnalyzer.analyze_power() + EnergyCalculator.calculate_energy()
+  ↓
+Queries: QueryManager.get_power_metrics()
+  ↓
+Database: ConnectionPool → Database
+  ↓
+Database: Execute SQL, return raw data
+  ↓
+Analysis: Process data, calculate energy, create summaries
+  ↓
+Service: Combine results, create business response
+  ↓
+Reporting: Format results (Excel/CSV/JSON) + display summary
+  ↓
+CLI: Show results to user + save files
+```
 
 ## License
 

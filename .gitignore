@@ -62,3 +62,6 @@ output/
 *.xlsx
 *.xls
 power_metrics_report*.xlsx
+# Environment variables with sensitive data
+.env
+src/database/config/.env
